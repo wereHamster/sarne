@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::{info};
+use tracing::info;
 
 use sarne::config::Config;
 
