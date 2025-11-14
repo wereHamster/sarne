@@ -42,6 +42,17 @@
           '';
         };
 
+        devShells.workflow = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            rustToolchain
+            rust-analyzer
+            protobuf
+            libiconv
+            openssl
+            pkg-config
+          ];
+        };
+
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "sarne";
           version = "0.1.0";
