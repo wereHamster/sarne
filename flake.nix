@@ -49,6 +49,7 @@
             protobuf
             libiconv
             openssl
+            pkg-config
           ];
         };
 
