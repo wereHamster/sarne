@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@v21
-      - run: nix run .#nix-develop .#workflow
+      - run: nix run github:nicknovitski/nix-develop .#workflow
       - run: cargo fmt --check
 
   clippy:
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@v21
-      - run: nix run .#nix-develop .#workflow
+      - run: nix run github:nicknovitski/nix-develop .#workflow
       - uses: giraffate/clippy-action@v1
         with:
           reporter: "github-pr-check"
@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v21
-      - run: nix run .#nix-develop .#workflow
+      - run: nix run github:nicknovitski/nix-develop .#workflow
       - run: cargo build --locked --all-features --all-targets
 
   test:
@@ -47,5 +47,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@v21
-      - run: nix run .#nix-develop .#workflow
+      - run: nix run github:nicknovitski/nix-develop .#workflow
       - run: cargo test --locked --all-features --all-targets
