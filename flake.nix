@@ -48,6 +48,7 @@
             rust-analyzer
             protobuf
             libiconv
+            openssl
           ];
         };
 
