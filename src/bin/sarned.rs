@@ -449,12 +449,8 @@ async fn process_htlc_event(
                     )
                     .await?;
             }
-            routerrpc::htlc_event::Event::SubscribedEvent(_) => {
-                ();
-            }
-            routerrpc::htlc_event::Event::FinalHtlcEvent(_) => {
-                ();
-            }
+            routerrpc::htlc_event::Event::SubscribedEvent(_) => {}
+            routerrpc::htlc_event::Event::FinalHtlcEvent(_) => {}
         }
     }
 
