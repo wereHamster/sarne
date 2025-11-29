@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "sarned"
 path = "src/bin/sarned.rs"
 
+[[bin]]
+name = "sarne-policy-agent"
+path = "src/bin/sarne_policy_agent.rs"
+
 [dependencies]
 prost = "0.14.1"
 prost-types = "0.14.1"
