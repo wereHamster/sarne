@@ -182,7 +182,7 @@ async fn apply_channel_policy_change(
     );
 
     if !args.dry_run {
-        update_channel_policy(client.clone(), &new_policy).await?;
+        update_channel_policy(client.clone(), new_policy).await?;
     }
 
     Ok(())
@@ -240,7 +240,7 @@ async fn collect_channel_policy_changes(
 ) -> Result<Vec<ChannelPolicyChange>> {
     let tasks: Vec<_> = channels
         .into_iter()
-        .map(|channel| process_channel(&db_client, client.clone(), info, channel))
+        .map(|channel| process_channel(db_client, client.clone(), info, channel))
         .collect();
 
     let channel_policy_change_results = join_all(tasks).await;
@@ -309,7 +309,7 @@ async fn process_channel(
     let outgoing_forwards_count = count_forwards(db_client, None, Some(channel_id), after).await?;
 
     let channel_balance_info =
-        get_channel_balance_info(client.clone(), db_client, &info, &channel, &chan_info).await?;
+        get_channel_balance_info(client.clone(), db_client, info, &channel, &chan_info).await?;
 
     let chan_point_parts: Vec<&str> = chan_info.chan_point.split(':').collect();
     let policy = ChannelPolicy {
