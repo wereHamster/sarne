@@ -1,22 +1,17 @@
 use anyhow::Result;
 use clap::Parser;
-use hyper_tls::{native_tls, HttpsConnector};
-use hyper_util::client::legacy::connect::HttpConnector;
-use std::fs;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio_postgres::NoTls;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tonic::metadata::MetadataValue;
-use tonic::transport::Endpoint;
 use tonic::Request;
-use tower::service_fn;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::prelude::*;
 
 use sarne::config::Config;
-use sarne::{lnrpc, routerrpc, to_channel_id, upsert_node};
+use sarne::{
+    connect_to_database, connect_to_lnd, create_lightning_clients, get_node_id,
+    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "sarned")]
@@ -24,129 +19,6 @@ struct Args {
     /// Path to the configuration file
     #[arg(short, long, default_value = "./sarne.toml")]
     config: String,
-}
-
-fn init_tracing_subscriber() {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    // If we detect that stdout/stderr is connected to journald, use the
-    // journald-specific layer.
-    //
-    // If connecting to journald fails, fall through to the fmt subscriber.
-    if std::env::var("JOURNAL_STREAM").is_ok() {
-        if let Ok(journald_layer) = tracing_journald::layer() {
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(journald_layer)
-                .init();
-            return;
-        }
-    }
-
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
-}
-
-async fn connect_to_database(config: &Config) -> Result<Arc<tokio_postgres::Client>> {
-    info!("Connecting to PostgreSQL at {}", config.database.url);
-
-    let (db_client, connection) = tokio_postgres::connect(&config.database.url, NoTls).await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("Database connection error: {}", e);
-        }
-    });
-
-    Ok(Arc::new(db_client))
-}
-
-async fn connect_to_lnd(config: &Config) -> Result<(tonic::transport::Channel, String)> {
-    info!("Connecting to LND at {}", config.lnd.endpoint);
-
-    let macaroon_bytes = fs::read(&config.lnd.macaroon)?;
-    let macaroon_hex = hex::encode(&macaroon_bytes);
-
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-
-    let tls_connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()?
-        .into();
-
-    let https = HttpsConnector::from((http, tls_connector));
-
-    let endpoint = Endpoint::from_shared(config.lnd.endpoint.clone())?;
-    let channel = endpoint
-        .connect_with_connector(service_fn(move |uri: tonic::transport::Uri| {
-            let https = https.clone();
-            async move {
-                let conn = tower::ServiceExt::<tonic::transport::Uri>::oneshot(https, uri)
-                    .await
-                    .map_err(std::io::Error::other)?;
-                Ok::<_, std::io::Error>(conn)
-            }
-        }))
-        .await?;
-
-    Ok((channel, macaroon_hex))
-}
-
-async fn create_lightning_clients(
-    channel: tonic::transport::Channel,
-    macaroon: String,
-) -> Result<(
-    lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
-    >,
-    routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
-    >,
-)> {
-    let interceptor = move |mut req: Request<()>| -> Result<Request<()>, tonic::Status> {
-        let macaroon_value = MetadataValue::try_from(&macaroon).unwrap();
-        req.metadata_mut().insert("macaroon", macaroon_value);
-        Ok(req)
-    };
-
-    let lightning_client = lnrpc::lightning_client::LightningClient::with_interceptor(
-        channel.clone(),
-        interceptor.clone(),
-    );
-
-    let router_client = routerrpc::router_client::RouterClient::with_interceptor(
-        channel.clone(),
-        interceptor.clone(),
-    );
-
-    Ok((lightning_client, router_client))
-}
-
-async fn get_node_id(
-    mut lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
-    >,
-    db_client: &tokio_postgres::Client,
-) -> Result<i32> {
-    let get_info_request = Request::new(lnrpc::GetInfoRequest {});
-    let get_info_response = lightning_client.get_info(get_info_request).await?;
-    let node_pubkey = get_info_response.into_inner().identity_pubkey;
-    let node_pubkey_bytes = hex::decode(&node_pubkey)?;
-
-    let node_id = upsert_node(db_client, &node_pubkey_bytes).await?;
-
-    Ok(node_id)
 }
 
 #[tokio::main]
