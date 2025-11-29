@@ -1,6 +1,8 @@
 use crate::config::Config;
 
 use anyhow::Result;
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use core::fmt;
 use hyper_tls::{native_tls, HttpsConnector};
 use hyper_util::client::legacy::connect::HttpConnector;
 use std::fs;
@@ -163,4 +165,281 @@ pub async fn get_node_id(
     let node_id = upsert_node(db_client, &node_pubkey_bytes).await?;
 
     Ok(node_id)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChannelBalanceCategory {
+    DepletedOutgoingLiquidity,
+    MinimalOutgoingLiquidity,
+    ModerateOutgoingLiquidity,
+    BalancedLiquidity,
+    ModerateIncomingLiquidity,
+    MinimalIncomingLiquidity,
+    DepletedIncomingLiquidity,
+}
+
+impl fmt::Display for ChannelBalanceCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChannelBalanceCategory::DepletedOutgoingLiquidity => {
+                write!(f, "DepletedOutgoingLiquidity")
+            }
+            ChannelBalanceCategory::MinimalOutgoingLiquidity => {
+                write!(f, "MinimalOutgoingLiquidity")
+            }
+            ChannelBalanceCategory::ModerateOutgoingLiquidity => {
+                write!(f, "ModerateOutgoingLiquidity")
+            }
+            ChannelBalanceCategory::BalancedLiquidity => write!(f, "BalancedLiquidity"),
+            ChannelBalanceCategory::ModerateIncomingLiquidity => {
+                write!(f, "ModerateIncomingLiquidity")
+            }
+            ChannelBalanceCategory::MinimalIncomingLiquidity => {
+                write!(f, "MinimalIncomingLiquidity")
+            }
+            ChannelBalanceCategory::DepletedIncomingLiquidity => {
+                write!(f, "DepletedIncomingLiquidity")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelBalanceInfo {
+    pub channel: lnrpc::Channel,
+    pub channel_balance_category: ChannelBalanceCategory,
+}
+
+pub async fn get_chan_info(
+    mut client: lnrpc::lightning_client::LightningClient<
+        tonic::service::interceptor::InterceptedService<
+            tonic::transport::Channel,
+            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
+        >,
+    >,
+    chan_id: u64,
+) -> Result<lnrpc::ChannelEdge> {
+    let request = Request::new(lnrpc::ChanInfoRequest {
+        chan_id,
+        chan_point: String::new(),
+    });
+    let response = client.get_chan_info(request).await?;
+    Ok(response.into_inner())
+}
+
+pub async fn get_channel_balance_info(
+    lightning_client: lnrpc::lightning_client::LightningClient<
+        tonic::service::interceptor::InterceptedService<
+            tonic::transport::Channel,
+            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
+        >,
+    >,
+    db_client: &tokio_postgres::Client,
+    _info: &lnrpc::GetInfoResponse,
+    channel: &lnrpc::Channel,
+    _channel_info: &lnrpc::ChannelEdge,
+) -> Result<ChannelBalanceInfo> {
+    let channel_id = to_channel_id(channel.chan_id);
+
+    let now = Utc::now();
+    let after = now - Duration::hours(48);
+
+    let local_balance = channel.local_balance;
+    let remote_balance = channel.remote_balance;
+
+    #[allow(deprecated)]
+    let local_chan_reserve_sat = channel.local_chan_reserve_sat;
+    if local_balance < local_chan_reserve_sat {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::DepletedOutgoingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    #[allow(deprecated)]
+    let remote_chan_reserve_sat = channel.remote_chan_reserve_sat;
+    if remote_balance < remote_chan_reserve_sat {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::DepletedIncomingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    let outgoing_forwards_count = count_forwards(db_client, None, Some(channel_id), after).await?;
+    let avg_outgoing_forward_size_msat = outgoing_forwards_count.avg_incoming_amount_msat;
+
+    if local_balance < local_chan_reserve_sat + 2 * 1000 * avg_outgoing_forward_size_msat {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::MinimalOutgoingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    let incoming_forwards_count = count_forwards(db_client, Some(channel_id), None, after).await?;
+    let avg_incoming_forward_size_msat = incoming_forwards_count.avg_incoming_amount_msat;
+
+    if remote_balance < remote_chan_reserve_sat + 2 * 1000 * avg_incoming_forward_size_msat {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::MinimalIncomingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    let chan_info = get_chan_info(lightning_client.clone(), channel.chan_id).await?;
+    let moderate_liquidity_threshold = (0.2 * chan_info.capacity as f64) as i64;
+
+    if local_balance < moderate_liquidity_threshold {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::ModerateOutgoingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    if remote_balance < moderate_liquidity_threshold {
+        let channel_balance_category = ChannelBalanceInfo {
+            channel: channel.clone(),
+            channel_balance_category: ChannelBalanceCategory::ModerateIncomingLiquidity,
+        };
+
+        return Ok(channel_balance_category);
+    }
+
+    let channel_balance_category = ChannelBalanceInfo {
+        channel: channel.clone(),
+        channel_balance_category: ChannelBalanceCategory::BalancedLiquidity,
+    };
+
+    Ok(channel_balance_category)
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ForwardRecord {
+    pub incoming_channel_id: i64,
+    pub outgoing_channel_id: i64,
+    pub incoming_htlc_id: i64,
+    pub outgoing_htlc_id: i64,
+    pub created_at: NaiveDateTime,
+    pub finalized_at: Option<NaiveDateTime>,
+    pub incoming_amount_msat: i64,
+    pub outgoing_amount_msat: i64,
+    pub state: i16,
+}
+
+pub async fn list_forwards(
+    db_client: &tokio_postgres::Client,
+    incoming_channel_id: Option<i64>,
+    outgoing_channel_id: Option<i64>,
+    after: DateTime<Utc>,
+) -> Result<Vec<ForwardRecord>> {
+    let after_naive = after.naive_utc();
+
+    let rows = if let Some(incoming_id) = incoming_channel_id {
+        db_client
+            .query(
+                "SELECT incoming_channel_id, outgoing_channel_id, incoming_htlc_id,
+                        outgoing_htlc_id, created_at, finalized_at, incoming_amount_msat,
+                        outgoing_amount_msat, state
+                 FROM forward
+                 WHERE incoming_channel_id = $1 AND created_at > $2
+                 ORDER BY created_at DESC",
+                &[&incoming_id, &after_naive],
+            )
+            .await?
+    } else if let Some(outgoing_id) = outgoing_channel_id {
+        db_client
+            .query(
+                "SELECT incoming_channel_id, outgoing_channel_id, incoming_htlc_id,
+                        outgoing_htlc_id, created_at, finalized_at, incoming_amount_msat,
+                        outgoing_amount_msat, state
+                 FROM forward
+                 WHERE outgoing_channel_id = $1 AND created_at > $2
+                 ORDER BY created_at DESC",
+                &[&outgoing_id, &after_naive],
+            )
+            .await?
+    } else {
+        return Ok(vec![]);
+    };
+
+    let forwards = rows
+        .iter()
+        .map(|row| ForwardRecord {
+            incoming_channel_id: row.get(0),
+            outgoing_channel_id: row.get(1),
+            incoming_htlc_id: row.get(2),
+            outgoing_htlc_id: row.get(3),
+            created_at: row.get(4),
+            finalized_at: row.get(5),
+            incoming_amount_msat: row.get(6),
+            outgoing_amount_msat: row.get(7),
+            state: row.get(8),
+        })
+        .collect();
+
+    Ok(forwards)
+}
+
+#[derive(Debug, Clone)]
+pub struct ForwardCount {
+    pub total_forwards_count: i64,
+    pub successful_forwards_count: i64,
+    pub avg_incoming_amount_msat: i64,
+}
+
+pub async fn count_forwards(
+    db_client: &tokio_postgres::Client,
+    incoming_channel_id: Option<i64>,
+    outgoing_channel_id: Option<i64>,
+    after: DateTime<Utc>,
+) -> Result<ForwardCount> {
+    let after_naive = after.naive_utc();
+
+    let row = if let Some(incoming_id) = incoming_channel_id {
+        db_client
+            .query_one(
+                "SELECT
+                    COUNT(*)                           AS total_forwards_count,
+                    COUNT(*) FILTER (WHERE state = 1)  AS successful_forwards_count,
+                    COALESCE(AVG(incoming_amount_msat)::bigint, 0) AS avg_incoming_amount_msat
+                 FROM forward
+                 WHERE incoming_channel_id = $1 AND created_at > $2",
+                &[&incoming_id, &after_naive],
+            )
+            .await?
+    } else if let Some(outgoing_id) = outgoing_channel_id {
+        db_client
+            .query_one(
+                "SELECT
+                    COUNT(*)                           AS total_forwards_count,
+                    COUNT(*) FILTER (WHERE state = 1)  AS successful_forwards_count,
+                    COALESCE(AVG(incoming_amount_msat)::bigint, 0) AS avg_incoming_amount_msat
+                 FROM forward
+                 WHERE outgoing_channel_id = $1 AND created_at > $2",
+                &[&outgoing_id, &after_naive],
+            )
+            .await?
+    } else {
+        return Ok(ForwardCount {
+            total_forwards_count: 0,
+            successful_forwards_count: 0,
+            avg_incoming_amount_msat: 0,
+        });
+    };
+
+    Ok(ForwardCount {
+        total_forwards_count: row.get(0),
+        successful_forwards_count: row.get(1),
+        avg_incoming_amount_msat: row.get(2),
+    })
 }
