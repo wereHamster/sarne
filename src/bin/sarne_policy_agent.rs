@@ -351,6 +351,13 @@ async fn process_channel(
     // Outgoing Fee Rate
     {
         if !has_outbound_liquidity {
+            // If we don't have any outbound liquidity at all, we target a outgoing forward
+            // rate between 12 and 15 per day.
+            //
+            // None of those forwards will be successful, unfortunately. But it gives us
+            // the opportunity to determine the fee rate that peers are willing to pay
+            // for the route.
+
             let outgoing_forwards_count = outgoing_forwards_count.total_forwards_count;
 
             let outgoing_forwards_lo_water_mark = 24;
@@ -412,6 +419,9 @@ async fn process_channel(
                 }
             }
         } else {
+            // We have outbound liquidity, payments can be routed through this channel.
+            // The target is between 1 and 10 successful forwards per day.
+
             let successful_outgoing_forward_count =
                 outgoing_forwards_count.successful_forwards_count;
 
