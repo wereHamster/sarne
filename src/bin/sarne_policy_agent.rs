@@ -7,8 +7,8 @@ use tracing::{debug, info};
 
 use sarne::config::Config;
 use sarne::{
-    connect_to_database, connect_to_lnd, count_forwards, create_lightning_clients, get_chan_info,
-    get_channel_balance_info, init_tracing_subscriber, lnrpc,
+    connect_to_lnd, count_forwards, create_lightning_clients, create_postgres_connection_pool,
+    get_chan_info, get_channel_balance_info, init_tracing_subscriber, lnrpc,
 };
 
 #[derive(Parser, Debug)]
@@ -78,9 +78,9 @@ async fn main() -> Result<()> {
 
     let config = Config::from_file(&args.config)?;
 
-    let (db_client, (lightning_client, _router_client)) = tokio::try_join!(
+    let (pgp, (lightning_client, _router_client)) = tokio::try_join!(
         // PostgreSQL
-        connect_to_database(&config),
+        create_postgres_connection_pool(&config),
         // LND
         async {
             let (channel, macaroon) = connect_to_lnd(&config).await?;
@@ -95,8 +95,7 @@ async fn main() -> Result<()> {
     info!("Found {} channels", channels.len());
 
     let channel_policy_changes =
-        collect_channel_policy_changes(&db_client, lightning_client.clone(), &info, channels)
-            .await?;
+        collect_channel_policy_changes(&pgp, lightning_client.clone(), &info, channels).await?;
 
     let now = Utc::now();
     let mut ready_to_apply_channel_policy_changes: Vec<_> = channel_policy_changes
@@ -228,7 +227,7 @@ pub fn to_channel_id(channel_id: u64) -> i64 {
 }
 
 async fn collect_channel_policy_changes(
-    db_client: &tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     client: lnrpc::lightning_client::LightningClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
@@ -240,7 +239,7 @@ async fn collect_channel_policy_changes(
 ) -> Result<Vec<ChannelPolicyChange>> {
     let tasks: Vec<_> = channels
         .into_iter()
-        .map(|channel| process_channel(db_client, client.clone(), info, channel))
+        .map(|channel| process_channel(pgp, client.clone(), info, channel))
         .collect();
 
     let channel_policy_change_results = join_all(tasks).await;
@@ -268,7 +267,7 @@ fn adjust_incoming_fee_rate(fee_rate: i32, change: f64) -> i32 {
 }
 
 async fn process_channel(
-    db_client: &tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     client: lnrpc::lightning_client::LightningClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
@@ -278,6 +277,8 @@ async fn process_channel(
     info: &lnrpc::GetInfoResponse,
     channel: lnrpc::Channel,
 ) -> Result<Vec<ChannelPolicyChange>> {
+    let db_client = pgp.get().await?;
+
     let chan_info = match get_chan_info(client.clone(), channel.chan_id).await {
         Ok(info) => info,
         Err(e) => {
@@ -305,11 +306,11 @@ async fn process_channel(
     let now = Utc::now();
     let after = now - FORWARDING_HISTORY_WINDOW;
 
-    let incoming_forwards_count = count_forwards(db_client, Some(channel_id), None, after).await?;
-    let outgoing_forwards_count = count_forwards(db_client, None, Some(channel_id), after).await?;
+    let incoming_forwards_count = count_forwards(&db_client, Some(channel_id), None, after).await?;
+    let outgoing_forwards_count = count_forwards(&db_client, None, Some(channel_id), after).await?;
 
     let channel_balance_info =
-        get_channel_balance_info(client.clone(), db_client, info, &channel, &chan_info).await?;
+        get_channel_balance_info(client.clone(), &db_client, info, &channel, &chan_info).await?;
 
     let chan_point_parts: Vec<&str> = chan_info.chan_point.split(':').collect();
     let policy = ChannelPolicy {
@@ -333,7 +334,7 @@ async fn process_channel(
     let has_inbound_liquidity = has_inbound_liquidity(remote_balance, total_balance);
 
     let last_outbound_policy = get_last_edge_policy_change(
-        db_client,
+        &db_client,
         &info.identity_pubkey,
         channel_id,
         "fee_rate_milli_msat",
@@ -341,7 +342,7 @@ async fn process_channel(
     .await?;
 
     let last_inbound_policy = get_last_edge_policy_change(
-        db_client,
+        &db_client,
         &info.identity_pubkey,
         channel_id,
         "inbound_fee_rate_milli_msat",
