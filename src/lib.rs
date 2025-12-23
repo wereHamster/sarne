@@ -138,7 +138,10 @@ pub async fn create_lightning_clients(
     let lightning_client = lnrpc::lightning_client::LightningClient::with_interceptor(
         channel.clone(),
         interceptor.clone(),
-    );
+    )
+    // Increase the decoding message size. The DescribeGraph request in particular
+    // can return a large response (larger than the default).
+    .max_decoding_message_size(64 * 1024 * 1024);
 
     let router_client = routerrpc::router_client::RouterClient::with_interceptor(
         channel.clone(),
