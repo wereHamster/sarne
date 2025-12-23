@@ -44,6 +44,21 @@ pub async fn upsert_node(
     Ok(row.get(0))
 }
 
+pub async fn upsert_node_tx(
+    transaction: &tokio_postgres::Transaction<'_>,
+    pubkey: &[u8],
+) -> Result<i32, tokio_postgres::Error> {
+    let row = transaction
+        .query_one(
+            "INSERT INTO node (pubkey) VALUES ($1)
+             ON CONFLICT (pubkey) DO UPDATE SET pubkey = EXCLUDED.pubkey
+             RETURNING id",
+            &[&pubkey],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
 pub fn init_tracing_subscriber() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));

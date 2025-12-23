@@ -1245,6 +1245,7 @@ dependencies = [
  "prost-types",
  "rand",
  "serde",
+ "sha2",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
