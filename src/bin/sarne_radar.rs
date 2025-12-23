@@ -459,6 +459,7 @@ async fn run_payment_probe(
             amt: 0,
             amt_msat: payment_probe.amount_msat as i64,
             ignored_nodes: [].to_vec(),
+            #[allow(deprecated)]
             ignored_edges: [].to_vec(),
             ignored_pairs: [].to_vec(),
             cltv_limit: 0,
