@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     let cancellation_token = CancellationToken::new();
 
     let mut app = App {
-        args: args,
+        args,
 
         cancellation_token: cancellation_token.clone(),
 
@@ -183,7 +183,7 @@ async fn get_channels(
                 let channels = Arc::new(list_channels(lightning_client).await?);
                 app.channels = Some((Utc::now(), channels.clone()));
                 info!("Got {} channels", channels.len());
-                return Ok(channels.clone());
+                Ok(channels.clone())
             } else {
                 Ok(channels.clone())
             }
@@ -286,7 +286,7 @@ async fn get_nodes(
                 let nodes = Arc::new(list_nodes(lightning_client).await?);
                 app.nodes = Some((Utc::now(), nodes.clone()));
                 info!("Got {} nodes", nodes.len());
-                return Ok(nodes.clone());
+                Ok(nodes.clone())
             } else {
                 Ok(nodes.clone())
             }
@@ -391,7 +391,7 @@ async fn radar_thread(
                     return Ok(());
                 }
 
-                if payment_probe.attempts.len() > 0 {
+                if !payment_probe.attempts.is_empty() {
                     if let Some(mut_client) = Arc::get_mut(&mut db_client) {
                         let payment_probe_id = save_payment_probe(mut_client, &payment_probe).await;
 
@@ -400,7 +400,7 @@ async fn radar_thread(
                                 print_payment_probe(
                                     nodes.clone(),
                                     &payment_probe,
-                                    &random_node,
+                                    random_node,
                                     payment_probe_id,
                                 );
                             }
@@ -484,7 +484,7 @@ async fn run_payment_probe(
         };
 
         let query_routes = query_routes_res.into_inner();
-        let route = match query_routes.routes.get(0) {
+        let route = match query_routes.routes.first() {
             Some(route) => route,
             None => {
                 warn!("QueryRoutes returned empty response");
@@ -493,7 +493,7 @@ async fn run_payment_probe(
         };
 
         let preimage: [u8; 32] = rng().random();
-        let payment_hash = sha2::Sha256::digest(&preimage).to_vec();
+        let payment_hash = sha2::Sha256::digest(preimage).to_vec();
 
         if app.cancellation_token.is_cancelled() {
             info!("Thread cancelled, exiting gracefully");
@@ -501,7 +501,7 @@ async fn run_payment_probe(
         }
 
         let send_to_route_req = Request::new(routerrpc::SendToRouteRequest {
-            payment_hash: payment_hash,
+            payment_hash,
             route: Some(route.clone()),
             skip_temp_err: false,
             first_hop_custom_records: HashMap::new(),
@@ -525,7 +525,7 @@ async fn run_payment_probe(
 
                         route: route.clone(),
 
-                        latency_ns: latency_ns,
+                        latency_ns,
                         failure: None,
                     };
 
@@ -541,7 +541,7 @@ async fn run_payment_probe(
 
                         route: route.clone(),
 
-                        latency_ns: latency_ns,
+                        latency_ns,
                         failure: Some(failure),
                     };
 
@@ -572,10 +572,10 @@ async fn save_payment_probe(
 ) -> Result<i64> {
     let transaction = db_client.transaction().await?;
 
-    let payment_probe_id = create_payment_probe(&transaction, &payment_probe).await?;
+    let payment_probe_id = create_payment_probe(&transaction, payment_probe).await?;
 
     for attempt in &payment_probe.attempts {
-        create_payment_probe_attempt(&transaction, payment_probe_id, &attempt).await?;
+        create_payment_probe_attempt(&transaction, payment_probe_id, attempt).await?;
     }
 
     transaction.commit().await?;
@@ -590,8 +590,8 @@ async fn create_payment_probe(
     let src_node_bytes = hex::decode(&payment_probe.src_node_pubkey)?;
     let dst_node_bytes = hex::decode(&payment_probe.dst_node_pubkey)?;
 
-    let src_node_id = upsert_node_tx(&transaction, &src_node_bytes).await?;
-    let dst_node_id = upsert_node_tx(&transaction, &dst_node_bytes).await?;
+    let src_node_id = upsert_node_tx(transaction, &src_node_bytes).await?;
+    let dst_node_id = upsert_node_tx(transaction, &dst_node_bytes).await?;
 
     let outgoing_chan_id_i64 = payment_probe.channel.chan_id as i64;
     let amount_msat = payment_probe.amount_msat as i64;
