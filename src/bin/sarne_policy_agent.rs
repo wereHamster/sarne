@@ -95,8 +95,7 @@ async fn main() -> Result<()> {
     info!("Found {} channels", channels.len());
 
     let channel_policy_changes =
-        collect_channel_policy_changes(&pgp, lightning_client.clone(), &info, channels)
-            .await?;
+        collect_channel_policy_changes(&pgp, lightning_client.clone(), &info, channels).await?;
 
     let now = Utc::now();
     let mut ready_to_apply_channel_policy_changes: Vec<_> = channel_policy_changes
