@@ -11,7 +11,7 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Endpoint;
 use tonic::Request;
 use tower::service_fn;
-use tracing::{info};
+use tracing::info;
 use tracing_subscriber::prelude::*;
 
 pub mod config;
@@ -89,7 +89,7 @@ pub async fn create_postgres_connection_pool(config: &Config) -> Result<deadpool
     };
     let mgr = deadpool_postgres::Manager::from_config(pg_config, NoTls, mgr_config);
 
-    let pool = deadpool_postgres::Pool::builder(mgr).max_size(1).build()?;
+    let pool = deadpool_postgres::Pool::builder(mgr).max_size(2).build()?;
 
     // Verify the connection immediately
     let _ = pool.get().await?;
