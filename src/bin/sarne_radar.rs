@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 
 use sarne::config::Config;
 use sarne::{
-    connect_to_database, connect_to_lnd, create_lightning_clients, init_tracing_subscriber, lnrpc,
-    routerrpc, upsert_node_tx,
+    connect_to_lnd, create_lightning_clients, create_postgres_connection_pool,
+    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx,
 };
 
 #[derive(Parser, Debug)]
@@ -51,9 +51,9 @@ async fn main() -> Result<()> {
 
     let config = Config::from_file(&args.config)?;
 
-    let (db_client, (lightning_client, router_client)) = tokio::try_join!(
+    let (pgp, (lightning_client, router_client)) = tokio::try_join!(
         // PostgreSQL
-        connect_to_database(&config),
+        create_postgres_connection_pool(&config),
         // LND
         async {
             let (channel, macaroon) = connect_to_lnd(&config).await?;
@@ -77,9 +77,10 @@ async fn main() -> Result<()> {
         channels: None,
     };
 
-    let mut thread = tokio::spawn(async move {
-        radar_thread(&mut app, db_client, lightning_client, router_client).await
-    });
+    let mut thread =
+        tokio::spawn(
+            async move { radar_thread(&mut app, &pgp, lightning_client, router_client).await },
+        );
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -320,7 +321,7 @@ struct PaymentProbeAttempt {
 
 async fn radar_thread(
     app: &mut App,
-    mut db_client: Arc<tokio_postgres::Client>,
+    pgp: &deadpool_postgres::Pool,
     lightning_client: lnrpc::lightning_client::LightningClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
@@ -392,24 +393,20 @@ async fn radar_thread(
                 }
 
                 if !payment_probe.attempts.is_empty() {
-                    if let Some(mut_client) = Arc::get_mut(&mut db_client) {
-                        let payment_probe_id = save_payment_probe(mut_client, &payment_probe).await;
+                    let payment_probe_id = save_payment_probe(pgp, &payment_probe).await;
 
-                        match payment_probe_id {
-                            Ok(payment_probe_id) => {
-                                print_payment_probe(
-                                    nodes.clone(),
-                                    &payment_probe,
-                                    random_node,
-                                    payment_probe_id,
-                                );
-                            }
-                            Err(err) => {
-                                warn!("Failed to save payment probe: {}", err);
-                            }
+                    match payment_probe_id {
+                        Ok(payment_probe_id) => {
+                            print_payment_probe(
+                                nodes.clone(),
+                                &payment_probe,
+                                random_node,
+                                payment_probe_id,
+                            );
                         }
-                    } else {
-                        panic!("Cannot get mutable access because the Arc is shared!");
+                        Err(err) => {
+                            warn!("Failed to save payment probe: {}", err);
+                        }
                     }
 
                     if app.args.delay > 0 {
@@ -568,9 +565,10 @@ fn randomize_amount(base_amount_sat: u64, variation: f64) -> u64 {
 }
 
 async fn save_payment_probe(
-    db_client: &mut tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     payment_probe: &PaymentProbe,
 ) -> Result<i64> {
+    let mut db_client = pgp.get().await?;
     let transaction = db_client.transaction().await?;
 
     let payment_probe_id = create_payment_probe(&transaction, payment_probe).await?;

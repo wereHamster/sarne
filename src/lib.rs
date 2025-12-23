@@ -5,14 +5,13 @@ use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use core::fmt;
 use hyper_tls::{native_tls, HttpsConnector};
 use hyper_util::client::legacy::connect::HttpConnector;
-use std::fs;
-use std::sync::Arc;
+use std::{fs, str::FromStr};
 use tokio_postgres::NoTls;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Endpoint;
 use tonic::Request;
 use tower::service_fn;
-use tracing::{error, info};
+use tracing::{info};
 use tracing_subscriber::prelude::*;
 
 pub mod config;
@@ -80,18 +79,22 @@ pub fn init_tracing_subscriber() {
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 }
 
-pub async fn connect_to_database(config: &Config) -> Result<Arc<tokio_postgres::Client>> {
+pub async fn create_postgres_connection_pool(config: &Config) -> Result<deadpool_postgres::Pool> {
     info!("Connecting to PostgreSQL at {}", config.database.url);
 
-    let (db_client, connection) = tokio_postgres::connect(&config.database.url, NoTls).await?;
+    let pg_config = tokio_postgres::Config::from_str(&config.database.url)?;
 
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("Database connection error: {}", e);
-        }
-    });
+    let mgr_config = deadpool_postgres::ManagerConfig {
+        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+    };
+    let mgr = deadpool_postgres::Manager::from_config(pg_config, NoTls, mgr_config);
 
-    Ok(Arc::new(db_client))
+    let pool = deadpool_postgres::Pool::builder(mgr).max_size(1).build()?;
+
+    // Verify the connection immediately
+    let _ = pool.get().await?;
+
+    Ok(pool)
 }
 
 pub async fn connect_to_lnd(config: &Config) -> Result<(tonic::transport::Channel, String)> {

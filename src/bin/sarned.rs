@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Parser;
-use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use sarne::config::Config;
 use sarne::{
-    connect_to_database, connect_to_lnd, create_lightning_clients, get_node_id,
+    connect_to_lnd, create_lightning_clients, create_postgres_connection_pool, get_node_id,
     init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node,
 };
 
@@ -31,9 +30,9 @@ async fn main() -> Result<()> {
 
     let config = Config::from_file(&args.config)?;
 
-    let (db_client, (lightning_client, router_client)) = tokio::try_join!(
+    let (pgp, (lightning_client, router_client)) = tokio::try_join!(
         // PostgreSQL
-        connect_to_database(&config),
+        create_postgres_connection_pool(&config),
         // LND
         async {
             let (channel, macaroon) = connect_to_lnd(&config).await?;
@@ -41,30 +40,33 @@ async fn main() -> Result<()> {
         },
     )?;
 
-    let node_id = get_node_id(lightning_client.clone(), &db_client).await?;
+    let node_id = {
+        let db_client = pgp.get().await?;
+        get_node_id(lightning_client.clone(), &db_client).await?
+    };
 
     let cancellation_token = CancellationToken::new();
 
-    let db_client_htlc = Arc::clone(&db_client);
+    let db_client_htlc = pgp.clone();
     let cancel_htlc = cancellation_token.clone();
     let node_id_htlc = node_id;
     let mut htlc_task = tokio::spawn(async move {
-        process_htlc_stream(router_client, db_client_htlc, node_id_htlc, cancel_htlc).await
+        process_htlc_stream(router_client, &db_client_htlc, node_id_htlc, cancel_htlc).await
     });
 
-    let db_client_graph = Arc::clone(&db_client);
+    let db_client_graph = pgp.clone();
     let lightning_client_graph = lightning_client.clone();
     let cancel_graph = cancellation_token.clone();
     let mut graph_task = tokio::spawn(async move {
-        process_channel_graph_stream(lightning_client_graph, db_client_graph, cancel_graph).await
+        process_channel_graph_stream(lightning_client_graph, &db_client_graph, cancel_graph).await
     });
 
-    let db_client_liquidity = Arc::clone(&db_client);
+    let db_client_liquidity = pgp.clone();
     let cancel_liquidity = cancellation_token.clone();
     let mut liquidity_task = tokio::spawn(async move {
         sample_channel_liquidity_loop(
             lightning_client,
-            db_client_liquidity,
+            &db_client_liquidity,
             node_id,
             cancel_liquidity,
         )
@@ -125,7 +127,7 @@ async fn process_htlc_stream(
             impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
         >,
     >,
-    db_client: Arc<tokio_postgres::Client>,
+    pgp: &deadpool_postgres::Pool,
     node_id: i32,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
@@ -142,7 +144,7 @@ async fn process_htlc_stream(
 
         match event {
             Ok(htlc_event) => {
-                if let Err(e) = process_htlc_event(&db_client, node_id, &htlc_event).await {
+                if let Err(e) = process_htlc_event(pgp, node_id, &htlc_event).await {
                     error!(error = %e, "Error processing HTLC event");
                 }
             }
@@ -159,10 +161,12 @@ async fn process_htlc_stream(
 }
 
 async fn process_htlc_event(
-    db_client: &tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     node_id: i32,
     event: &routerrpc::HtlcEvent,
 ) -> Result<()> {
+    let db_client = pgp.get().await?;
+
     let event_type = routerrpc::htlc_event::EventType::try_from(event.event_type)
         .unwrap_or(routerrpc::htlc_event::EventType::Unknown);
 
@@ -336,7 +340,7 @@ async fn process_channel_graph_stream(
             impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
         >,
     >,
-    db_client: Arc<tokio_postgres::Client>,
+    pgp: &deadpool_postgres::Pool,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     let request = Request::new(lnrpc::GraphTopologySubscription {});
@@ -352,7 +356,7 @@ async fn process_channel_graph_stream(
 
         match update {
             Ok(graph_update) => {
-                if let Err(e) = process_channel_graph_update(&db_client, &graph_update).await {
+                if let Err(e) = process_channel_graph_update(pgp, &graph_update).await {
                     error!(error = %e, "Error processing channel graph update");
                 }
             }
@@ -369,9 +373,11 @@ async fn process_channel_graph_stream(
 }
 
 async fn process_channel_graph_update(
-    db_client: &tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     update: &lnrpc::GraphTopologyUpdate,
 ) -> Result<()> {
+    let db_client = pgp.get().await?;
+
     if !update.channel_updates.is_empty() {
         let now = chrono::Utc::now().naive_utc();
 
@@ -380,7 +386,7 @@ async fn process_channel_graph_update(
                 let node_pubkey = hex::decode(&channel_update.advertising_node)?;
                 let channel_id = to_channel_id(channel_update.chan_id);
 
-                let node_id = upsert_node(db_client, &node_pubkey).await?;
+                let node_id = upsert_node(&db_client, &node_pubkey).await?;
 
                 debug!(
                     node_pubkey_hex = &channel_update.advertising_node,
@@ -434,13 +440,13 @@ async fn sample_channel_liquidity_loop(
             impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
         >,
     >,
-    db_client: Arc<tokio_postgres::Client>,
+    pgp: &deadpool_postgres::Pool,
     node_id: i32,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     info!("Starting channel liquidity sampling (every 5 minutes)");
 
-    if let Err(e) = sample_channel_liquidity(&mut client, &db_client, node_id).await {
+    if let Err(e) = sample_channel_liquidity(&mut client, pgp, node_id).await {
         error!(error = %e, "Error sampling channel liquidity");
     }
 
@@ -454,7 +460,7 @@ async fn sample_channel_liquidity_loop(
             }
         }
 
-        if let Err(e) = sample_channel_liquidity(&mut client, &db_client, node_id).await {
+        if let Err(e) = sample_channel_liquidity(&mut client, pgp, node_id).await {
             error!(error = %e, "Error sampling channel liquidity");
         }
     }
@@ -469,9 +475,11 @@ async fn sample_channel_liquidity(
             impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
         >,
     >,
-    db_client: &tokio_postgres::Client,
+    pgp: &deadpool_postgres::Pool,
     node_id: i32,
 ) -> Result<()> {
+    let db_client = pgp.get().await?;
+
     let request = Request::new(lnrpc::ListChannelsRequest {
         active_only: false,
         inactive_only: false,
