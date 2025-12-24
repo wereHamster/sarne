@@ -360,13 +360,6 @@ async fn radar_thread(
             continue;
         }
 
-        if channels
-            .iter()
-            .any(|channel| channel.remote_pubkey == destination_pub_key)
-        {
-            continue;
-        }
-
         let random_channel = match channels.choose(&mut rng()) {
             Some(channel) => channel,
             None => {
@@ -374,6 +367,10 @@ async fn radar_thread(
                 exit(0);
             }
         };
+
+        if random_channel.remote_pubkey == destination_pub_key {
+            continue;
+        }
 
         let mut payment_probe = PaymentProbe {
             created_at: Utc::now().naive_utc(),
