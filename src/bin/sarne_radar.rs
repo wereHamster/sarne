@@ -354,6 +354,7 @@ async fn radar_thread(
                 exit(0);
             }
         };
+
         let destination_pub_key = random_node.pub_key.clone();
         if destination_pub_key == source_pub_key {
             continue;
@@ -366,6 +367,10 @@ async fn radar_thread(
                 exit(0);
             }
         };
+
+        if random_channel.remote_pubkey == destination_pub_key {
+            continue;
+        }
 
         let mut payment_probe = PaymentProbe {
             created_at: Utc::now().naive_utc(),
