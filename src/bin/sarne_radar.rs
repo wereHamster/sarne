@@ -33,6 +33,8 @@ struct Args {
 struct App {
     args: Args,
 
+    postgres_connection_pool: deadpool_postgres::Pool,
+
     cancellation_token: CancellationToken,
 
     info: lnrpc::GetInfoResponse,
@@ -51,7 +53,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_file(&args.config)?;
 
-    let (pgp, (lightning_client, router_client)) = tokio::try_join!(
+    let (postgres_connection_pool, (lightning_client, router_client)) = tokio::try_join!(
         // PostgreSQL
         create_postgres_connection_pool(&config),
         // LND
@@ -69,6 +71,8 @@ async fn main() -> Result<()> {
     let mut app = App {
         args,
 
+        postgres_connection_pool,
+
         cancellation_token: cancellation_token.clone(),
 
         info: info.clone(),
@@ -78,9 +82,7 @@ async fn main() -> Result<()> {
     };
 
     let mut thread =
-        tokio::spawn(
-            async move { radar_thread(&mut app, &pgp, lightning_client, router_client).await },
-        );
+        tokio::spawn(async move { radar_thread(&mut app, lightning_client, router_client).await });
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -321,7 +323,6 @@ struct PaymentProbeAttempt {
 
 async fn radar_thread(
     app: &mut App,
-    pgp: &deadpool_postgres::Pool,
     lightning_client: lnrpc::lightning_client::LightningClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
@@ -393,7 +394,7 @@ async fn radar_thread(
                 }
 
                 if !payment_probe.attempts.is_empty() {
-                    let payment_probe_id = save_payment_probe(pgp, &payment_probe).await;
+                    let payment_probe_id = save_payment_probe(app, &payment_probe).await;
 
                     match payment_probe_id {
                         Ok(payment_probe_id) => {
@@ -564,11 +565,8 @@ fn randomize_amount(base_amount_sat: u64, variation: f64) -> u64 {
     rng.random_range(min..max).round() as u64
 }
 
-async fn save_payment_probe(
-    pgp: &deadpool_postgres::Pool,
-    payment_probe: &PaymentProbe,
-) -> Result<i64> {
-    let mut db_client = pgp.get().await?;
+async fn save_payment_probe(app: &App, payment_probe: &PaymentProbe) -> Result<i64> {
+    let mut db_client = app.postgres_connection_pool.get().await?;
     let transaction = db_client.transaction().await?;
 
     let payment_probe_id = create_payment_probe(&transaction, payment_probe).await?;
