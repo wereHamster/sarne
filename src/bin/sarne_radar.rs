@@ -794,8 +794,8 @@ fn print_payment_probe(
         "    Result:              {}",
         if payment_probe
             .attempts
-            .iter()
-            .all(|attempt| attempt.failure.is_none())
+            .last()
+            .map_or(false, |attempt| attempt.failure.is_none())
         {
             String::from("SUCCESS")
         } else {
