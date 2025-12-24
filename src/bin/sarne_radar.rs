@@ -505,7 +505,17 @@ async fn run_payment_probe(
             skip_temp_err: false,
             first_hop_custom_records: HashMap::new(),
         });
-        let send_to_route_res = router_client.send_to_route_v2(send_to_route_req).await?;
+
+        let send_to_route_res = match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            router_client.send_to_route_v2(send_to_route_req),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => return Ok(()),
+        };
+
         let res = send_to_route_res.into_inner();
 
         let latency_ns = res.resolve_time_ns - res.attempt_time_ns;
