@@ -354,8 +354,16 @@ async fn radar_thread(
                 exit(0);
             }
         };
+
         let destination_pub_key = random_node.pub_key.clone();
         if destination_pub_key == source_pub_key {
+            continue;
+        }
+
+        if channels
+            .iter()
+            .any(|channel| channel.remote_pubkey == destination_pub_key)
+        {
             continue;
         }
 
