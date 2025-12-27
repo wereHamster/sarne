@@ -376,7 +376,7 @@ async fn radar_thread(
             lightning_client.clone(),
             router_client.clone(),
             nodes.clone(),
-            &random_node,
+            random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
 
@@ -409,7 +409,7 @@ async fn radar_thread(
             lightning_client.clone(),
             router_client.clone(),
             nodes.clone(),
-            &random_node,
+            random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
 
