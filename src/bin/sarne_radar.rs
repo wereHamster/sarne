@@ -301,7 +301,7 @@ struct PaymentProbe {
     created_at: NaiveDateTime,
 
     src_node_pubkey: String,
-    channel: lnrpc::Channel,
+    channel: Option<lnrpc::Channel>,
     dst_node_pubkey: String,
 
     amount_msat: u64,
@@ -345,8 +345,6 @@ async fn radar_thread(
         }
 
         let nodes = get_nodes(app, lightning_client.clone()).await?;
-        let channels = get_channels(app, lightning_client.clone()).await?;
-
         let random_node = match nodes.choose(&mut rng()) {
             Some(node) => node,
             None => {
@@ -355,11 +353,45 @@ async fn radar_thread(
             }
         };
 
+        // If we picked our own node, skip.
         let destination_pub_key = random_node.pub_key.clone();
         if destination_pub_key == source_pub_key {
             continue;
         }
 
+        // For each destination, we run two probes:
+        //
+        //  - Probe A: We let LND pick the best route.
+        //  - Probe B: We pick a random outgoing channel to route through.
+        //
+        // The first probe gives us the best (lowest fee) route to the target. The second probe
+        // forces LND to pick an alternative route, giving us a more diverse view on the network.
+        //
+        // There is a chance that the random channel we select for probe B will be the same as
+        // the one used by probe A. We don't bother to avoid that. Given that the two probes
+        // use different amounts, it's possible that probe B is forced to use a different route.
+
+        execute_payment_probe(
+            app,
+            lightning_client.clone(),
+            router_client.clone(),
+            nodes.clone(),
+            random_node,
+            PaymentProbe {
+                created_at: Utc::now().naive_utc(),
+
+                src_node_pubkey: source_pub_key.clone(),
+                channel: None,
+                dst_node_pubkey: destination_pub_key.clone(),
+
+                amount_msat: randomize_amount(200_000, 0.35) * 1000,
+
+                attempts: Vec::new(),
+            },
+        )
+        .await?;
+
+        let channels = get_channels(app, lightning_client.clone()).await?;
         let random_channel = match channels.choose(&mut rng()) {
             Some(channel) => channel,
             None => {
@@ -372,64 +404,90 @@ async fn radar_thread(
             continue;
         }
 
-        let mut payment_probe = PaymentProbe {
-            created_at: Utc::now().naive_utc(),
-
-            src_node_pubkey: source_pub_key.clone(),
-            channel: random_channel.clone(),
-            dst_node_pubkey: destination_pub_key.clone(),
-
-            amount_msat: randomize_amount(200_000, 0.35) * 1000,
-
-            attempts: Vec::new(),
-        };
-
-        let result = run_payment_probe(
+        execute_payment_probe(
             app,
             lightning_client.clone(),
             router_client.clone(),
-            &mut payment_probe,
+            nodes.clone(),
+            random_node,
+            PaymentProbe {
+                created_at: Utc::now().naive_utc(),
+
+                src_node_pubkey: source_pub_key.clone(),
+                channel: Some(random_channel.clone()),
+                dst_node_pubkey: destination_pub_key.clone(),
+
+                amount_msat: randomize_amount(200_000, 0.35) * 1000,
+
+                attempts: Vec::new(),
+            },
         )
-        .await;
-
-        match result {
-            Ok(()) => {
-                if app.cancellation_token.is_cancelled() {
-                    return Ok(());
-                }
-
-                if !payment_probe.attempts.is_empty() {
-                    let payment_probe_id = save_payment_probe(app, &payment_probe).await;
-
-                    match payment_probe_id {
-                        Ok(payment_probe_id) => {
-                            print_payment_probe(
-                                nodes.clone(),
-                                &payment_probe,
-                                random_node,
-                                payment_probe_id,
-                            );
-                        }
-                        Err(err) => {
-                            warn!("Failed to save payment probe: {}", err);
-                        }
-                    }
-
-                    if app.args.delay > 0 {
-                        info!("Delay for {} seconds", app.args.delay);
-
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(app.args.delay as u64)) => (),
-                            _ = app.cancellation_token.cancelled() => (),
-                        };
-                    }
-                }
-            }
-            Err(e) => {
-                info!("run_payment_probe failed {}", e);
-            }
-        };
+        .await?;
     }
+
+    Ok(())
+}
+
+async fn execute_payment_probe(
+    app: &mut App,
+    lightning_client: lnrpc::lightning_client::LightningClient<
+        tonic::service::interceptor::InterceptedService<
+            tonic::transport::Channel,
+            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
+        >,
+    >,
+    router_client: routerrpc::router_client::RouterClient<
+        tonic::service::interceptor::InterceptedService<
+            tonic::transport::Channel,
+            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
+        >,
+    >,
+    nodes: Arc<Vec<lnrpc::LightningNode>>,
+    random_node: &lnrpc::LightningNode,
+    payment_probe: PaymentProbe,
+) -> Result<()> {
+    let mut payment_probe = payment_probe;
+
+    if app.cancellation_token.is_cancelled() {
+        return Ok(());
+    }
+
+    let result = run_payment_probe(
+        app,
+        lightning_client.clone(),
+        router_client.clone(),
+        &mut payment_probe,
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            if !payment_probe.attempts.is_empty() {
+                let payment_probe_id = save_payment_probe(app, &payment_probe).await;
+
+                match payment_probe_id {
+                    Ok(payment_probe_id) => {
+                        print_payment_probe(nodes, &payment_probe, random_node, payment_probe_id);
+                    }
+                    Err(err) => {
+                        warn!("Failed to save payment probe: {}", err);
+                    }
+                }
+
+                if app.args.delay > 0 {
+                    info!("Delay for {} seconds", app.args.delay);
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(app.args.delay as u64)) => (),
+                        _ = app.cancellation_token.cancelled() => (),
+                    };
+                }
+            }
+        }
+        Err(e) => {
+            info!("run_payment_probe failed {}", e);
+        }
+    };
 
     Ok(())
 }
@@ -467,7 +525,7 @@ async fn run_payment_probe(
             ignored_pairs: [].to_vec(),
             cltv_limit: 0,
             dest_custom_records: HashMap::new(),
-            outgoing_chan_id: payment_probe.channel.chan_id,
+            outgoing_chan_id: payment_probe.channel.as_ref().map_or(0, |c| c.chan_id),
             last_hop_pubkey: [].to_vec(),
             route_hints: [].to_vec(),
             blinded_payment_paths: [].to_vec(),
@@ -605,7 +663,8 @@ async fn create_payment_probe(
     let src_node_id = upsert_node_tx(transaction, &src_node_bytes).await?;
     let dst_node_id = upsert_node_tx(transaction, &dst_node_bytes).await?;
 
-    let outgoing_chan_id_i64 = payment_probe.channel.chan_id as i64;
+    let outgoing_chan_id_i64: Option<i64> =
+        payment_probe.channel.as_ref().map(|c| c.chan_id as i64);
     let amount_msat = payment_probe.amount_msat as i64;
 
     let row = transaction
@@ -757,16 +816,19 @@ fn print_payment_probe(
         dst_node.alias, dst_node.pub_key
     );
 
-    let outgoing_channel_peer_alias = nodes
-        .iter()
-        .find(|n| n.pub_key == payment_probe.channel.remote_pubkey)
-        .map(|n| n.alias.as_str())
-        .unwrap_or(&payment_probe.channel.remote_pubkey);
+    if let Some(channel) = &payment_probe.channel {
+        let outgoing_channel_peer_alias = nodes
+            .iter()
+            .find(|n| n.pub_key == channel.remote_pubkey)
+            .map(|n| n.alias.as_str())
+            .unwrap_or(&channel.remote_pubkey);
 
-    info!(
-        "    Outgoing Channel:    {} [{}]",
-        payment_probe.channel.chan_id, outgoing_channel_peer_alias
-    );
+        info!(
+            "    Outgoing Channel:    {} [{}]",
+            channel.chan_id, outgoing_channel_peer_alias
+        );
+    }
+
     info!(
         "    Amount:              {} sat",
         payment_probe.amount_msat / 1000
