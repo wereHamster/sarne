@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, create_lightning_clients, create_postgres_connection_pool, get_node_id,
-    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node,
+    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node_tx,
 };
 
 #[derive(Parser, Debug)]
@@ -376,17 +376,19 @@ async fn process_channel_graph_update(
     pgp: &deadpool_postgres::Pool,
     update: &lnrpc::GraphTopologyUpdate,
 ) -> Result<()> {
-    let db_client = pgp.get().await?;
+    let mut db_client = pgp.get().await?;
 
     if !update.channel_updates.is_empty() {
         let now = chrono::Utc::now().naive_utc();
+
+        let transaction = db_client.transaction().await?;
 
         for channel_update in &update.channel_updates {
             if let Some(ref routing_policy) = channel_update.routing_policy {
                 let node_pubkey = hex::decode(&channel_update.advertising_node)?;
                 let channel_id = to_channel_id(channel_update.chan_id);
 
-                let node_id = upsert_node(&db_client, &node_pubkey).await?;
+                let node_id = upsert_node_tx(&transaction, &node_pubkey).await?;
 
                 debug!(
                     node_pubkey_hex = &channel_update.advertising_node,
@@ -394,7 +396,7 @@ async fn process_channel_graph_update(
                     "Update edge policy"
                 );
 
-                db_client
+                transaction
                     .execute(
                         "UPDATE edge_policy_history
                          SET valid_to = $1
@@ -403,7 +405,7 @@ async fn process_channel_graph_update(
                     )
                     .await?;
 
-                db_client
+                transaction
                     .execute(
                         "INSERT INTO edge_policy_history
                          (node_id, channel_id, valid_from, disabled,
@@ -428,6 +430,8 @@ async fn process_channel_graph_update(
                     .await?;
             }
         }
+
+        transaction.commit().await?;
     }
 
     Ok(())
