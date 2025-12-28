@@ -15,7 +15,8 @@ use tracing::{error, info, warn};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, create_lightning_clients, create_postgres_connection_pool,
-    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx, LndInterceptor,
+    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx, LightningClient, LndInterceptor,
+    RouterClient,
 };
 
 #[derive(Parser, Debug)]
@@ -34,6 +35,9 @@ struct App {
     args: Args,
 
     postgres_connection_pool: deadpool_postgres::Pool,
+
+    lightning_client: LightningClient,
+    router_client: RouterClient,
 
     cancellation_token: CancellationToken,
 
@@ -75,14 +79,16 @@ async fn main() -> Result<()> {
 
         cancellation_token: cancellation_token.clone(),
 
+        lightning_client,
+        router_client,
+
         info: info.clone(),
 
         nodes: None,
         channels: None,
     };
 
-    let mut thread =
-        tokio::spawn(async move { radar_thread(&mut app, lightning_client, router_client).await });
+    let mut thread = tokio::spawn(async move { radar_thread(&mut app).await });
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -142,11 +148,7 @@ async fn get_node_info(
     Ok(response.into_inner())
 }
 
-async fn list_channels(
-    mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-) -> Result<Vec<lnrpc::Channel>> {
+async fn list_channels(app: &mut App) -> Result<Vec<lnrpc::Channel>> {
     let request = Request::new(lnrpc::ListChannelsRequest {
         active_only: false,
         inactive_only: false,
@@ -155,26 +157,21 @@ async fn list_channels(
         peer: vec![],
         peer_alias_lookup: false,
     });
-    let response = client.list_channels(request).await?;
+    let response = app.lightning_client.list_channels(request).await?;
     Ok(response.into_inner().channels)
 }
 
-async fn get_channels(
-    app: &mut App,
-    lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-) -> Result<Arc<Vec<lnrpc::Channel>>> {
+async fn get_channels(app: &mut App) -> Result<Arc<Vec<lnrpc::Channel>>> {
     match app.channels.clone() {
         None => {
-            let channels = Arc::new(list_channels(lightning_client).await?);
+            let channels = Arc::new(list_channels(app).await?);
             app.channels = Some((Utc::now(), channels.clone()));
             info!("Got {} channels", channels.len());
             Ok(channels.clone())
         }
         Some((updated_at, channels)) => {
             if Utc::now() - updated_at > chrono::Duration::hours(24) {
-                let channels = Arc::new(list_channels(lightning_client).await?);
+                let channels = Arc::new(list_channels(app).await?);
                 app.channels = Some((Utc::now(), channels.clone()));
                 info!("Got {} channels", channels.len());
                 Ok(channels.clone())
@@ -185,15 +182,11 @@ async fn get_channels(
     }
 }
 
-async fn list_nodes(
-    mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-) -> Result<Vec<lnrpc::LightningNode>> {
+async fn list_nodes(app: &mut App) -> Result<Vec<lnrpc::LightningNode>> {
     let request = Request::new(lnrpc::ChannelGraphRequest {
         include_unannounced: false,
     });
-    let channel_graph_response = client.describe_graph(request).await?;
+    let channel_graph_response = app.lightning_client.describe_graph(request).await?;
     let channel_graph = channel_graph_response.into_inner();
 
     struct Stats {
@@ -256,22 +249,17 @@ async fn list_nodes(
     Ok(nodes)
 }
 
-async fn get_nodes(
-    app: &mut App,
-    lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
+async fn get_nodes(app: &mut App) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
     match app.nodes.clone() {
         None => {
-            let nodes = Arc::new(list_nodes(lightning_client).await?);
+            let nodes = Arc::new(list_nodes(app).await?);
             app.nodes = Some((Utc::now(), nodes.clone()));
             info!("Got {} nodes", nodes.len());
             Ok(nodes.clone())
         }
         Some((updated_at, nodes)) => {
             if Utc::now() - updated_at > chrono::Duration::hours(24) {
-                let nodes = Arc::new(list_nodes(lightning_client).await?);
+                let nodes = Arc::new(list_nodes(app).await?);
                 app.nodes = Some((Utc::now(), nodes.clone()));
                 info!("Got {} nodes", nodes.len());
                 Ok(nodes.clone())
@@ -280,6 +268,29 @@ async fn get_nodes(
             }
         }
     }
+}
+
+/// Pick a node to target in the payment probe.
+///
+/// With some probability (currently 20%), pick a node we have a channel with. Those nodes
+/// are particularly interesting since we use information gathered by the probe to adjust
+/// our fee rate with that peer.
+async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode>> {
+    let nodes = get_nodes(app).await?;
+    let channels = get_channels(app).await?;
+
+    let mut rng = rng();
+    if rng.random_bool(0.2) {
+        let random_channel = channels.choose(&mut rng);
+        if let Some(channel) = random_channel {
+            let remote_pubkey = &channel.remote_pubkey;
+            if let Some(node) = nodes.iter().find(|n| &n.pub_key == remote_pubkey) {
+                return Ok(Some(node.clone()));
+            }
+        }
+    }
+
+    Ok(nodes.choose(&mut rng).cloned())
 }
 
 struct PaymentProbe {
@@ -306,15 +317,7 @@ struct PaymentProbeAttempt {
     failure: Option<lnrpc::Failure>,
 }
 
-async fn radar_thread(
-    app: &mut App,
-    lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-    router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-) -> Result<()> {
+async fn radar_thread(app: &mut App) -> Result<()> {
     let source_pub_key = app.info.identity_pubkey.clone();
 
     loop {
@@ -323,8 +326,7 @@ async fn radar_thread(
             break;
         }
 
-        let nodes = get_nodes(app, lightning_client.clone()).await?;
-        let random_node = match nodes.choose(&mut rng()) {
+        let random_node = match select_target_node(app).await? {
             Some(node) => node,
             None => {
                 info!("No nodes in channel graph");
@@ -356,10 +358,7 @@ async fn radar_thread(
 
         execute_payment_probe(
             app,
-            lightning_client.clone(),
-            router_client.clone(),
-            nodes.clone(),
-            random_node,
+            &random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
 
@@ -374,7 +373,7 @@ async fn radar_thread(
         )
         .await?;
 
-        let channels = get_channels(app, lightning_client.clone()).await?;
+        let channels = get_channels(app).await?;
         let random_channel = match channels.choose(&mut rng()) {
             Some(channel) => channel,
             None => {
@@ -389,10 +388,7 @@ async fn radar_thread(
 
         execute_payment_probe(
             app,
-            lightning_client.clone(),
-            router_client.clone(),
-            nodes.clone(),
-            random_node,
+            &random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
 
@@ -413,13 +409,6 @@ async fn radar_thread(
 
 async fn execute_payment_probe(
     app: &mut App,
-    lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-    router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-    nodes: Arc<Vec<lnrpc::LightningNode>>,
     random_node: &lnrpc::LightningNode,
     payment_probe: PaymentProbe,
 ) -> Result<()> {
@@ -429,13 +418,7 @@ async fn execute_payment_probe(
         return Ok(());
     }
 
-    let result = run_payment_probe(
-        app,
-        lightning_client.clone(),
-        router_client.clone(),
-        &mut payment_probe,
-    )
-    .await;
+    let result = run_payment_probe(app, &mut payment_probe).await;
 
     match result {
         Ok(()) => {
@@ -444,6 +427,7 @@ async fn execute_payment_probe(
 
                 match payment_probe_id {
                     Ok(payment_probe_id) => {
+                        let nodes = get_nodes(app).await?;
                         print_payment_probe(nodes, &payment_probe, random_node, payment_probe_id);
                     }
                     Err(err) => {
@@ -469,16 +453,7 @@ async fn execute_payment_probe(
     Ok(())
 }
 
-async fn run_payment_probe(
-    app: &mut App,
-    mut lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-    mut router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
-    >,
-    payment_probe: &mut PaymentProbe,
-) -> Result<()> {
+async fn run_payment_probe(app: &mut App, payment_probe: &mut PaymentProbe) -> Result<()> {
     let src_node_bytes = hex::decode(&payment_probe.src_node_pubkey)?;
     let dst_node_bytes = hex::decode(&payment_probe.dst_node_pubkey)?;
 
@@ -518,7 +493,7 @@ async fn run_payment_probe(
             }),
             use_mission_control: true,
         });
-        let query_routes_res_result = lightning_client.query_routes(query_routes_req).await;
+        let query_routes_res_result = app.lightning_client.query_routes(query_routes_req).await;
         let query_routes_res = match query_routes_res_result {
             Ok(res) => res,
             Err(_) => {
@@ -552,7 +527,7 @@ async fn run_payment_probe(
 
         let send_to_route_res = match tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            router_client.send_to_route_v2(send_to_route_req),
+            app.router_client.send_to_route_v2(send_to_route_req),
         )
         .await
         {
