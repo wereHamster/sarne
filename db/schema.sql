@@ -4,6 +4,8 @@
 CREATE TABLE node (
   id serial PRIMARY KEY,
   pubkey bytea,
+
+  -- The latest known node alias.
   alias text
 );
 
