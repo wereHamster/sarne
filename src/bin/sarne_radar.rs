@@ -349,6 +349,10 @@ async fn radar_thread(
         // There is a chance that the random channel we select for probe B will be the same as
         // the one used by probe A. We don't bother to avoid that. Given that the two probes
         // use different amounts, it's possible that probe B is forced to use a different route.
+        //
+        // Probes always skip direct channels with the destination. The fee would always be zero
+        // (since the local node doesn't charge for outgoing payments). The only useful signal we
+        // would get from these probes is latency.
 
         execute_payment_probe(
             app,
@@ -475,6 +479,9 @@ async fn run_payment_probe(
     >,
     payment_probe: &mut PaymentProbe,
 ) -> Result<()> {
+    let src_node_bytes = hex::decode(&payment_probe.src_node_pubkey)?;
+    let dst_node_bytes = hex::decode(&payment_probe.dst_node_pubkey)?;
+
     for attempt in 0..3 {
         if app.cancellation_token.is_cancelled() {
             info!("Thread cancelled, exiting gracefully");
@@ -489,7 +496,14 @@ async fn run_payment_probe(
             ignored_nodes: [].to_vec(),
             #[allow(deprecated)]
             ignored_edges: [].to_vec(),
-            ignored_pairs: [].to_vec(),
+
+            // Skip direct channels between source and destination.
+            ignored_pairs: [lnrpc::NodePair {
+                from: src_node_bytes.clone(),
+                to: dst_node_bytes.clone(),
+            }]
+            .to_vec(),
+
             cltv_limit: 0,
             dest_custom_records: HashMap::new(),
             outgoing_chan_id: payment_probe.channel.as_ref().map_or(0, |c| c.chan_id),
