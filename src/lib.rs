@@ -59,6 +59,23 @@ pub async fn upsert_node_tx(
     Ok(row.get(0))
 }
 
+pub async fn update_node_tx(
+    transaction: &tokio_postgres::Transaction<'_>,
+    pubkey: &[u8],
+    alias: &String,
+) -> Result<()> {
+    transaction
+        .query(
+            "UPDATE node
+             SET alias = $2
+             WHERE pubkey = $1",
+            &[&pubkey, &alias],
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub fn init_tracing_subscriber() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
