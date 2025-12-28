@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, count_forwards, create_lightning_clients, create_postgres_connection_pool,
-    get_chan_info, get_channel_balance_info, init_tracing_subscriber, lnrpc,
+    get_chan_info, get_channel_balance_info, init_tracing_subscriber, lnrpc, LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
@@ -146,10 +146,7 @@ async fn main() -> Result<()> {
 async fn apply_channel_policy_change(
     args: &Args,
     client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     channel_policy_change: &ChannelPolicyChange,
 ) -> Result<()> {
@@ -189,10 +186,7 @@ async fn apply_channel_policy_change(
 
 async fn get_node_info(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<lnrpc::GetInfoResponse> {
     let request = Request::new(lnrpc::GetInfoRequest {});
@@ -202,10 +196,7 @@ async fn get_node_info(
 
 async fn list_channels(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<Vec<lnrpc::Channel>> {
     let request = Request::new(lnrpc::ListChannelsRequest {
@@ -229,10 +220,7 @@ pub fn to_channel_id(channel_id: u64) -> i64 {
 async fn collect_channel_policy_changes(
     pgp: &deadpool_postgres::Pool,
     client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     info: &lnrpc::GetInfoResponse,
     channels: Vec<lnrpc::Channel>,
@@ -269,10 +257,7 @@ fn adjust_incoming_fee_rate(fee_rate: i32, change: f64) -> i32 {
 async fn process_channel(
     pgp: &deadpool_postgres::Pool,
     client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     info: &lnrpc::GetInfoResponse,
     channel: lnrpc::Channel,
@@ -693,10 +678,7 @@ fn add_time_to_policy_change(
 
 async fn get_node_alias(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     pub_key: &str,
 ) -> String {
@@ -718,10 +700,7 @@ async fn get_node_alias(
 
 async fn update_channel_policy(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     policy: &ChannelPolicy,
 ) -> Result<()> {

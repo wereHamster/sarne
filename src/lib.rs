@@ -8,6 +8,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use std::{fs, str::FromStr};
 use tokio_postgres::NoTls;
 use tonic::metadata::MetadataValue;
+use tonic::service::Interceptor;
 use tonic::transport::Endpoint;
 use tonic::Request;
 use tower::service_fn;
@@ -130,28 +131,32 @@ pub async fn connect_to_lnd(config: &Config) -> Result<(tonic::transport::Channe
     Ok((channel, macaroon_hex))
 }
 
+#[derive(Clone)]
+pub struct LndInterceptor {
+    macaroon: MetadataValue<tonic::metadata::Ascii>,
+}
+
+impl Interceptor for LndInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, tonic::Status> {
+        request
+            .metadata_mut()
+            .insert("macaroon", self.macaroon.clone());
+        Ok(request)
+    }
+}
+
+type InterceptedChannel =
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>;
+
+pub type LightningClient = lnrpc::lightning_client::LightningClient<InterceptedChannel>;
+pub type RouterClient = routerrpc::router_client::RouterClient<InterceptedChannel>;
+
 pub async fn create_lightning_clients(
     channel: tonic::transport::Channel,
     macaroon: String,
-) -> Result<(
-    lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
-    >,
-    routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
-    >,
-)> {
-    let interceptor = move |mut req: Request<()>| -> Result<Request<()>, tonic::Status> {
-        let macaroon_value = MetadataValue::try_from(&macaroon).unwrap();
-        req.metadata_mut().insert("macaroon", macaroon_value);
-        Ok(req)
-    };
+) -> Result<(LightningClient, RouterClient)> {
+    let macaroon = MetadataValue::try_from(&macaroon)?;
+    let interceptor = LndInterceptor { macaroon };
 
     let lightning_client = lnrpc::lightning_client::LightningClient::with_interceptor(
         channel.clone(),
@@ -171,10 +176,7 @@ pub async fn create_lightning_clients(
 
 pub async fn get_node_id(
     mut lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     db_client: &tokio_postgres::Client,
 ) -> Result<i32> {
@@ -233,10 +235,7 @@ pub struct ChannelBalanceInfo {
 
 pub async fn get_chan_info(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     chan_id: u64,
 ) -> Result<lnrpc::ChannelEdge> {
@@ -250,10 +249,7 @@ pub async fn get_chan_info(
 
 pub async fn get_channel_balance_info(
     lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     db_client: &tokio_postgres::Client,
     _info: &lnrpc::GetInfoResponse,

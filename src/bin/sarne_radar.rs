@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, create_lightning_clients, create_postgres_connection_pool,
-    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx,
+    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx, LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
@@ -134,10 +134,7 @@ async fn main() -> Result<()> {
 
 async fn get_node_info(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<lnrpc::GetInfoResponse> {
     let request = Request::new(lnrpc::GetInfoRequest {});
@@ -147,10 +144,7 @@ async fn get_node_info(
 
 async fn list_channels(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<Vec<lnrpc::Channel>> {
     let request = Request::new(lnrpc::ListChannelsRequest {
@@ -168,10 +162,7 @@ async fn list_channels(
 async fn get_channels(
     app: &mut App,
     lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<Arc<Vec<lnrpc::Channel>>> {
     match app.channels.clone() {
@@ -196,10 +187,7 @@ async fn get_channels(
 
 async fn list_nodes(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<Vec<lnrpc::LightningNode>> {
     let request = Request::new(lnrpc::ChannelGraphRequest {
@@ -271,10 +259,7 @@ async fn list_nodes(
 async fn get_nodes(
     app: &mut App,
     lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
     match app.nodes.clone() {
@@ -324,16 +309,10 @@ struct PaymentProbeAttempt {
 async fn radar_thread(
     app: &mut App,
     lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
 ) -> Result<()> {
     let source_pub_key = app.info.identity_pubkey.clone();
@@ -431,16 +410,10 @@ async fn radar_thread(
 async fn execute_payment_probe(
     app: &mut App,
     lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     nodes: Arc<Vec<lnrpc::LightningNode>>,
     random_node: &lnrpc::LightningNode,
@@ -495,16 +468,10 @@ async fn execute_payment_probe(
 async fn run_payment_probe(
     app: &mut App,
     mut lightning_client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     mut router_client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     payment_probe: &mut PaymentProbe,
 ) -> Result<()> {
