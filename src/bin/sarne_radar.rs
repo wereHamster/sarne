@@ -1,9 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Parser;
-use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
-use rand::{rng, Rng, SeedableRng};
+use rand::{rng, Rng};
 use sha2::Digest;
 use std::collections::{HashMap, HashSet};
 use std::process::exit;
@@ -272,11 +271,10 @@ async fn get_nodes(app: &mut App) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
 }
 
 async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode>> {
-    let mut rng = StdRng::from_os_rng();
-
     let nodes = get_nodes(app).await?;
     let channels = get_channels(app).await?;
 
+    let mut rng = rng();
     if rng.random_bool(0.3) {
         let random_channel = channels.choose(&mut rng);
         if let Some(channel) = random_channel {
