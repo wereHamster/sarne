@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, create_lightning_clients, create_postgres_connection_pool, get_node_id,
-    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node_tx,
+    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node_tx, LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
@@ -122,10 +122,7 @@ async fn main() -> Result<()> {
 
 async fn process_htlc_stream(
     mut client: routerrpc::router_client::RouterClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     pgp: &deadpool_postgres::Pool,
     node_id: i32,
@@ -335,10 +332,7 @@ async fn process_htlc_event(
 
 async fn process_channel_graph_stream(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     pgp: &deadpool_postgres::Pool,
     cancellation_token: CancellationToken,
@@ -439,10 +433,7 @@ async fn process_channel_graph_update(
 
 async fn sample_channel_liquidity_loop(
     mut client: lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     pgp: &deadpool_postgres::Pool,
     node_id: i32,
@@ -474,10 +465,7 @@ async fn sample_channel_liquidity_loop(
 
 async fn sample_channel_liquidity(
     client: &mut lnrpc::lightning_client::LightningClient<
-        tonic::service::interceptor::InterceptedService<
-            tonic::transport::Channel,
-            impl Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Clone,
-        >,
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
     >,
     pgp: &deadpool_postgres::Pool,
     node_id: i32,
