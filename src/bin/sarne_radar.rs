@@ -14,7 +14,8 @@ use tracing::{error, info, warn};
 
 use sarne::config::Config;
 use sarne::{
-    LndInterceptor, connect_to_lnd, create_lightning_clients, create_postgres_connection_pool, init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx
+    connect_to_lnd, create_lightning_clients, create_postgres_connection_pool,
+    init_tracing_subscriber, lnrpc, routerrpc, upsert_node_tx, LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
