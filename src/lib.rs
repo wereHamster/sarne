@@ -62,10 +62,10 @@ pub async fn upsert_node_tx(
 pub async fn update_node_tx(
     transaction: &tokio_postgres::Transaction<'_>,
     pubkey: &[u8],
-    alias: &String,
+    alias: &str,
 ) -> Result<()> {
     transaction
-        .query(
+        .execute(
             "UPDATE node
              SET alias = $2
              WHERE pubkey = $1",

@@ -372,68 +372,71 @@ async fn process_channel_graph_update(
     update: &lnrpc::GraphTopologyUpdate,
 ) -> Result<()> {
     let mut db_client = pgp.get().await?;
+    let transaction = db_client.transaction().await?;
 
-    if !update.channel_updates.is_empty() {
-        let now = chrono::Utc::now().naive_utc();
+    let now = chrono::Utc::now().naive_utc();
 
-        let transaction = db_client.transaction().await?;
+    for node_update in &update.node_updates {
+        let node_pubkey = hex::decode(&node_update.identity_key)?;
 
-        for node_update in &update.node_updates {
-            let node_pubkey = hex::decode(&node_update.identity_key)?;
+        info!(
+            node_pubkey_hex = &node_update.identity_key,
+            alias = &node_update.alias,
+            "Update node"
+        );
 
-            update_node_tx(&transaction, &node_pubkey, &node_update.alias).await?;
-        }
+        update_node_tx(&transaction, &node_pubkey, &node_update.alias).await?;
+    }
 
-        for channel_update in &update.channel_updates {
-            if let Some(ref routing_policy) = channel_update.routing_policy {
-                let node_pubkey = hex::decode(&channel_update.advertising_node)?;
-                let channel_id = to_channel_id(channel_update.chan_id);
+    for channel_update in &update.channel_updates {
+        if let Some(ref routing_policy) = channel_update.routing_policy {
+            let node_pubkey = hex::decode(&channel_update.advertising_node)?;
+            let channel_id = to_channel_id(channel_update.chan_id);
 
-                let node_id = upsert_node_tx(&transaction, &node_pubkey).await?;
+            let node_id = upsert_node_tx(&transaction, &node_pubkey).await?;
 
-                debug!(
-                    node_pubkey_hex = &channel_update.advertising_node,
-                    channel_id = channel_update.chan_id,
-                    "Update edge policy"
-                );
+            debug!(
+                node_pubkey_hex = &channel_update.advertising_node,
+                channel_id = channel_update.chan_id,
+                "Update edge policy"
+            );
 
-                transaction
-                    .execute(
-                        "UPDATE edge_policy_history
+            transaction
+                .execute(
+                    "UPDATE edge_policy_history
                          SET valid_to = $1
                          WHERE node_id = $2 AND channel_id = $3 AND valid_to IS NULL",
-                        &[&now, &node_id, &channel_id],
-                    )
-                    .await?;
+                    &[&now, &node_id, &channel_id],
+                )
+                .await?;
 
-                transaction
-                    .execute(
-                        "INSERT INTO edge_policy_history
+            transaction
+                .execute(
+                    "INSERT INTO edge_policy_history
                          (node_id, channel_id, valid_from, disabled,
                           time_lock_delta, min_htlc_msat, max_htlc_msat,
                           fee_base_msat, fee_rate_milli_msat,
                           inbound_fee_base_msat, inbound_fee_rate_milli_msat)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-                        &[
-                            &node_id,
-                            &channel_id,
-                            &now,
-                            &routing_policy.disabled,
-                            &(routing_policy.time_lock_delta as i32),
-                            &(routing_policy.min_htlc * 1000),
-                            &(routing_policy.max_htlc_msat as i64),
-                            &routing_policy.fee_base_msat,
-                            &routing_policy.fee_rate_milli_msat,
-                            &(routing_policy.inbound_fee_base_msat as i64),
-                            &(routing_policy.inbound_fee_rate_milli_msat as i64),
-                        ],
-                    )
-                    .await?;
-            }
+                    &[
+                        &node_id,
+                        &channel_id,
+                        &now,
+                        &routing_policy.disabled,
+                        &(routing_policy.time_lock_delta as i32),
+                        &(routing_policy.min_htlc * 1000),
+                        &(routing_policy.max_htlc_msat as i64),
+                        &routing_policy.fee_base_msat,
+                        &routing_policy.fee_rate_milli_msat,
+                        &(routing_policy.inbound_fee_base_msat as i64),
+                        &(routing_policy.inbound_fee_rate_milli_msat as i64),
+                    ],
+                )
+                .await?;
         }
-
-        transaction.commit().await?;
     }
+
+    transaction.commit().await?;
 
     Ok(())
 }
