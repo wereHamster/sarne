@@ -379,7 +379,7 @@ async fn process_channel_graph_update(
     for node_update in &update.node_updates {
         let node_pubkey = hex::decode(&node_update.identity_key)?;
 
-        info!(
+        debug!(
             node_pubkey_hex = &node_update.identity_key,
             alias = &node_update.alias,
             "Update node"
