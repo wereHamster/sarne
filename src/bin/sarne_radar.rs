@@ -351,7 +351,7 @@ async fn radar_thread(
         // use different amounts, it's possible that probe B is forced to use a different route.
         //
         // Probes always skip direct channels with the destination. The fee would always be zero
-        // (since the local node doesn't charge to outgoing payments). The only useful signal we
+        // (since the local node doesn't charge for outgoing payments). The only useful signal we
         // would get from these probes is latency.
 
         execute_payment_probe(
