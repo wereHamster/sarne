@@ -3,7 +3,10 @@
 
 CREATE TABLE node (
   id serial PRIMARY KEY,
-  pubkey bytea
+  pubkey bytea,
+
+  -- The latest known node alias.
+  alias text
 );
 
 CREATE UNIQUE INDEX node_pubkey_idx

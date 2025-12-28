@@ -9,7 +9,8 @@ use tracing::{debug, error, info, warn};
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, create_lightning_clients, create_postgres_connection_pool, get_node_id,
-    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, upsert_node_tx, LndInterceptor,
+    init_tracing_subscriber, lnrpc, routerrpc, to_channel_id, update_node_tx, upsert_node_tx,
+    LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
@@ -376,6 +377,12 @@ async fn process_channel_graph_update(
         let now = chrono::Utc::now().naive_utc();
 
         let transaction = db_client.transaction().await?;
+
+        for node_update in &update.node_updates {
+            let node_pubkey = hex::decode(&node_update.identity_key)?;
+
+            update_node_tx(&transaction, &node_pubkey, &node_update.alias).await?;
+        }
 
         for channel_update in &update.channel_updates {
             if let Some(ref routing_policy) = channel_update.routing_policy {
