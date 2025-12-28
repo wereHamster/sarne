@@ -290,7 +290,7 @@ async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode
         }
     }
 
-    return Ok(nodes.choose(&mut rng).cloned());
+    Ok(nodes.choose(&mut rng).cloned())
 }
 
 struct PaymentProbe {
