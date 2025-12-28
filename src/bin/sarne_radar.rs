@@ -270,12 +270,17 @@ async fn get_nodes(app: &mut App) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
     }
 }
 
+/// Pick a node to target in the payment probe.
+///
+/// With some probability (currently 20%), pick a node we have a channel with. Those nodes
+/// are particularly interesting since we use information gathered by the probe to adjust
+/// our fee rate with that peer.
 async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode>> {
     let nodes = get_nodes(app).await?;
     let channels = get_channels(app).await?;
 
     let mut rng = rng();
-    if rng.random_bool(0.3) {
+    if rng.random_bool(0.2) {
         let random_channel = channels.choose(&mut rng);
         if let Some(channel) = random_channel {
             let remote_pubkey = &channel.remote_pubkey;
@@ -329,8 +334,6 @@ async fn radar_thread(app: &mut App) -> Result<()> {
             }
         };
 
-        let nodes = get_nodes(app).await?;
-
         // If we picked our own node, skip.
         let destination_pub_key = random_node.pub_key.clone();
         if destination_pub_key == source_pub_key {
@@ -355,7 +358,6 @@ async fn radar_thread(app: &mut App) -> Result<()> {
 
         execute_payment_probe(
             app,
-            nodes.clone(),
             &random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
@@ -386,7 +388,6 @@ async fn radar_thread(app: &mut App) -> Result<()> {
 
         execute_payment_probe(
             app,
-            nodes.clone(),
             &random_node,
             PaymentProbe {
                 created_at: Utc::now().naive_utc(),
@@ -408,7 +409,6 @@ async fn radar_thread(app: &mut App) -> Result<()> {
 
 async fn execute_payment_probe(
     app: &mut App,
-    nodes: Arc<Vec<lnrpc::LightningNode>>,
     random_node: &lnrpc::LightningNode,
     payment_probe: PaymentProbe,
 ) -> Result<()> {
@@ -427,6 +427,7 @@ async fn execute_payment_probe(
 
                 match payment_probe_id {
                     Ok(payment_probe_id) => {
+                        let nodes = get_nodes(app).await?;
                         print_payment_probe(nodes, &payment_probe, random_node, payment_probe_id);
                     }
                     Err(err) => {
