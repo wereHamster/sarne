@@ -562,20 +562,30 @@ async fn run_payment_probe(app: &mut App, payment_probe: &mut PaymentProbe) -> R
                     return Ok(());
                 }
                 _ => {
-                    let payment_probe_attempt = PaymentProbeAttempt {
-                        seqno: attempt,
+                    if failure.failure_source_index == 0 {
+                        // Failure on source index zero (0) indicates a failure on the local
+                        // node. We should that not attribute to any other node (it's our own
+                        // problem).
+                        //
+                        // Ignore the attempt and stop the probe.
 
-                        created_at: Utc::now().naive_utc(),
+                        return Ok(());
+                    } else {
+                        let payment_probe_attempt = PaymentProbeAttempt {
+                            seqno: attempt,
 
-                        route: route.clone(),
+                            created_at: Utc::now().naive_utc(),
 
-                        latency_ns,
-                        failure: Some(failure),
-                    };
+                            route: route.clone(),
 
-                    payment_probe.attempts.push(payment_probe_attempt);
+                            latency_ns,
+                            failure: Some(failure),
+                        };
 
-                    continue;
+                        payment_probe.attempts.push(payment_probe_attempt);
+
+                        continue;
+                    }
                 }
             },
         }
@@ -750,7 +760,7 @@ async fn create_payment_probe_attempt(
                 &[
                     &payment_probe_id,
                     &attempt.seqno,
-                    &(failure.failure_source_index as i16),
+                    &((failure.failure_source_index - 1) as i16),
                     &failure.code,
                 ],
             )
