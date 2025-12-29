@@ -91,7 +91,7 @@ CREATE TABLE payment_probe (
   created_at timestamp,
 
   src_node_id integer REFERENCES node (id),
-  outgoing_short_channel_id bigint,
+  outgoing_channel_id bigint,
   dst_node_id integer REFERENCES node (id),
 
   amount_msat bigint
@@ -117,7 +117,7 @@ CREATE TABLE payment_probe_hop (
   attempt_seqno smallint,
   hop_seqno smallint,
 
-  short_channel_id bigint,
+  channel_id bigint,
   node_id integer REFERENCES node (id),
   fee_msat bigint,
 

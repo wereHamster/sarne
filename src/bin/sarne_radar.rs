@@ -639,7 +639,7 @@ async fn create_payment_probe(
             INSERT INTO payment_probe
                 ( created_at
                 , src_node_id
-                , outgoing_short_channel_id
+                , outgoing_channel_id
                 , dst_node_id
                 , amount_msat
                 )
@@ -725,7 +725,7 @@ async fn create_payment_probe_attempt(
                     ( payment_probe_id
                     , attempt_seqno
                     , hop_seqno
-                    , short_channel_id
+                    , channel_id
                     , node_id
                     , fee_msat
                     )
