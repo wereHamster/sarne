@@ -83,6 +83,46 @@ CREATE INDEX forward_outgoing_channel_id_idx ON forward (outgoing_channel_id, cr
 
 
 -----------------------------------------------------------------------------
+-- Statistics
+
+-- This table stores the naturally observed flow between two nodes.
+--
+-- The source node is alway the one that's doing the obseration. It's expected
+-- that the source node has one or more direct channels with the destination.
+-- If the source node has multiple channels, the flow is based on the
+-- cumulative observations across all those channels.
+--
+-- The vector ignores flows caused by local payments, rebalancing actions, or
+-- other similar manual intervention that trigger in- or outflows of liquidity.
+CREATE TABLE peer_flow_vector (
+  src_node_id integer REFERENCES node (id) ON DELETE CASCADE,
+  dst_node_id integer REFERENCES node (id) ON DELETE CASCADE,
+
+  -- Time when the peer flow vector was last updated.
+  updated_at timestamp,
+
+  -- Number between -100 and +100 that denotes in which direction liquidity
+  -- flows between the source and destination node.
+  --
+  -- Negative numbers means the node is a sink, while positive numbers mean
+  -- the node is a source. The larger the magnitude the more extreme the node
+  -- leans in that direction.
+  --
+  --  -100 -> The node is a pure sink. Liquidity never ever flows back into
+  --          our direction. We have never seen incoming HTLCs from that node.
+  --  +100 -> The node is a pure source. We have no hope of ever seeing
+  --          natural flow in the direction of that node.
+  --
+  -- A value of zero means liquidity flows equally in both directions
+  -- (the other node is a perfect routing peer).
+  flow_bias_index smallint,
+
+  PRIMARY KEY (src_node_id, dst_node_id)
+);
+
+
+
+-----------------------------------------------------------------------------
 -- Payment Probes
 
 -- Payment probe targets that we want to scan at fixed intervals.
