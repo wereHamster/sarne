@@ -288,11 +288,14 @@ async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode
         .query(
             "
             WITH latest_payment_probe AS (
-              SELECT pp.dst_node_id, MAX(pp.created_at) AS created_at
+              SELECT
+                pp.dst_node_id,
+                MAX(pp.created_at) AS created_at
               FROM payment_probe pp
               GROUP BY pp.dst_node_id
             )
-            SELECT encode(n.pubkey, 'hex') AS pubkey, interval, created_at
+            SELECT
+              encode(n.pubkey, 'hex') AS pubkey
             FROM payment_probe_target
             LEFT JOIN latest_payment_probe lpp ON lpp.dst_node_id = node_id
             JOIN node n ON n.id = node_id
