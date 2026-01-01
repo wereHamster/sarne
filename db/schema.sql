@@ -85,6 +85,16 @@ CREATE INDEX forward_outgoing_channel_id_idx ON forward (outgoing_channel_id, cr
 -----------------------------------------------------------------------------
 -- Payment Probes
 
+-- Payment probe targets that we want to scan at fixed intervals.
+CREATE TABLE payment_probe_target (
+    node_id integer REFERENCES node (id) ON DELETE CASCADE,
+
+    -- Interval at which to send payment probes to this target.
+    interval interval,
+
+    PRIMARY KEY (node_id)
+);
+
 CREATE TABLE payment_probe (
   id bigserial PRIMARY KEY,
 

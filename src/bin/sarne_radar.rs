@@ -272,12 +272,47 @@ async fn get_nodes(app: &mut App) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
 
 /// Pick a node to target in the payment probe.
 ///
-/// With some probability (currently 20%), pick a node we have a channel with. Those nodes
-/// are particularly interesting since we use information gathered by the probe to adjust
-/// our fee rate with that peer.
+/// First we check the 'payment_probe_target' table to see if we have any targets that
+/// we want to scan at fixed intervals. If there's a node that we didn't sent a payment
+/// probe to in the configured interval, pick that as target.
+///
+/// Otherwise, with some probability (currently 20%), pick a node we have a channel with.
+///
+/// Lastly, pick a random (but active) node from the graph. We only consider nodes that
+/// have been updated recently and have a certain number of open channels.
 async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode>> {
     let nodes = get_nodes(app).await?;
     let channels = get_channels(app).await?;
+
+    let db_client = app.postgres_connection_pool.get().await?;
+    let payment_probe_target_rows = db_client
+        .query(
+            "
+            WITH latest_payment_probe AS (
+              SELECT
+                pp.dst_node_id,
+                MAX(pp.created_at) AS created_at
+              FROM payment_probe pp
+              GROUP BY pp.dst_node_id
+            )
+            SELECT
+              encode(n.pubkey, 'hex') AS pubkey
+            FROM payment_probe_target
+            LEFT JOIN latest_payment_probe lpp ON lpp.dst_node_id = node_id
+            JOIN node n ON n.id = node_id
+            WHERE created_at + interval < NOW()
+            ORDER BY created_at ASC
+            ",
+            &[],
+        )
+        .await?;
+
+    if let Some(row) = payment_probe_target_rows.first() {
+        let pubkey: String = row.get(0);
+        if let Some(node) = nodes.iter().find(|n| n.pub_key == pubkey) {
+            return Ok(Some(node.clone()));
+        }
+    }
 
     let mut rng = rng();
     if rng.random_bool(0.2) {
