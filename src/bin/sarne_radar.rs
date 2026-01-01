@@ -303,9 +303,9 @@ async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode
         )
         .await?;
 
-    if let Some(row) = payment_probe_target_rows.get(0) {
+    if let Some(row) = payment_probe_target_rows.first() {
         let pubkey: String = row.get(0);
-        if let Some(node) = nodes.iter().find(|n| &n.pub_key == &pubkey) {
+        if let Some(node) = nodes.iter().find(|n| n.pub_key == pubkey) {
             return Ok(Some(node.clone()));
         }
     }
