@@ -277,8 +277,9 @@ async fn get_nodes(app: &mut App) -> Result<Arc<Vec<lnrpc::LightningNode>>> {
 /// probe to in the configured interval, pick that as target.
 ///
 /// Otherwise, with some probability (currently 20%), pick a node we have a channel with.
-/// Those nodes are particularly interesting since we use information gathered by the
-/// probe to adjust our fee rate with that peer.
+///
+/// Lastly, pick a random (but active) node from the graph. We only consider nodes that
+/// have been updated recently and have a certain number of open channels.
 async fn select_target_node(app: &mut App) -> Result<Option<lnrpc::LightningNode>> {
     let nodes = get_nodes(app).await?;
     let channels = get_channels(app).await?;
