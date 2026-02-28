@@ -2,13 +2,17 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use clap::Parser;
 use futures::future::join_all;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tonic::Request;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use sarne::config::Config;
 use sarne::{
     connect_to_lnd, count_forwards, create_lightning_clients, create_postgres_connection_pool,
-    get_chan_info, get_channel_balance_info, init_tracing_subscriber, lnrpc, LndInterceptor,
+    get_chan_info, get_channel_balance_info, get_node_id, init_tracing_subscriber, lnrpc,
+    routerrpc, upsert_node_tx, LndInterceptor,
 };
 
 #[derive(Parser, Debug)]
@@ -25,6 +29,26 @@ struct Args {
     /// Apply all policy changes instead of just the first one
     #[arg(short, long, default_value_t = false)]
     all: bool,
+}
+
+struct App {
+    args: Args,
+
+    postgres_connection_pool: deadpool_postgres::Pool,
+
+    lightning_client: lnrpc::lightning_client::LightningClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
+    >,
+
+    router_client: routerrpc::router_client::RouterClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, LndInterceptor>,
+    >,
+
+    cancellation_token: CancellationToken,
+
+    info: lnrpc::GetInfoResponse,
+
+    src_node_id: i32,
 }
 
 /// Time between policy changes on a particular channel (and direction).
@@ -78,7 +102,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_file(&args.config)?;
 
-    let (pgp, (lightning_client, _router_client)) = tokio::try_join!(
+    let (postgres_connection_pool, (lightning_client, router_client)) = tokio::try_join!(
         // PostgreSQL
         create_postgres_connection_pool(&config),
         // LND
@@ -91,54 +115,74 @@ async fn main() -> Result<()> {
     let info = get_node_info(lightning_client.clone()).await?;
     info!("Connected to LND node: {}", info.identity_pubkey);
 
-    let channels = list_channels(lightning_client.clone()).await?;
-    info!("Found {} channels", channels.len());
-
-    let channel_policy_changes =
-        collect_channel_policy_changes(&pgp, lightning_client.clone(), &info, channels).await?;
-
-    let now = Utc::now();
-    let mut ready_to_apply_channel_policy_changes: Vec<_> = channel_policy_changes
-        .iter()
-        .filter(|pc| pc.apply_at < now)
-        .collect();
-
-    if ready_to_apply_channel_policy_changes.is_empty() {
-        if let Some(policy_change) = channel_policy_changes.first() {
-            info!(
-                "No policy changes to apply (next at {})",
-                policy_change.apply_at.to_rfc3339()
-            );
-        } else {
-            info!("No policy changes needed");
-        }
-
-        return Ok(());
-    }
-
-    ready_to_apply_channel_policy_changes.sort_by(|a, b| a.apply_at.cmp(&b.apply_at));
-    let to_apply_channel_policy_changes = if args.all {
-        ready_to_apply_channel_policy_changes
-    } else {
-        ready_to_apply_channel_policy_changes
-            .into_iter()
-            .take(1)
-            .collect()
+    let src_node_id = {
+        let db_client = postgres_connection_pool.get().await?;
+        get_node_id(lightning_client.clone(), &db_client).await?
     };
 
-    info!(
-        "Applying {} policy change{}",
-        to_apply_channel_policy_changes.len(),
-        if to_apply_channel_policy_changes.len() > 1 {
-            "s"
-        } else {
-            ""
-        }
-    );
+    let cancellation_token = CancellationToken::new();
 
-    for channel_policy_change in to_apply_channel_policy_changes {
-        apply_channel_policy_change(&args, lightning_client.clone(), channel_policy_change).await?;
-    }
+    let mut app = App {
+        args,
+
+        postgres_connection_pool,
+
+        lightning_client,
+        router_client,
+
+        cancellation_token: cancellation_token.clone(),
+
+        info: info.clone(),
+
+        src_node_id,
+    };
+
+    let mut thread = tokio::spawn(async move { process_htlc_stream(&mut app).await });
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
+    let _ = tokio::select! {
+        r = &mut thread => {
+            error!("Thread exited unexpectedly");
+
+            match &r {
+                Ok(inner) => {
+                    match inner {
+                        Ok(_) => {
+                            error!("Ok");
+                        }
+                        Err(e) => {
+                            error!("Err {}", e);
+                        }
+                    };
+                }
+                Err(e) => {
+                    error!("Err {}", e);
+                }
+            };
+
+            Some(r)
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down gracefully");
+
+            cancellation_token.cancel();
+
+            let _ = tokio::join!(thread);
+
+            None
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT, shutting down gracefully");
+
+            cancellation_token.cancel();
+
+            let _ = tokio::join!(thread);
+
+            None
+        }
+    };
 
     Ok(())
 }
@@ -728,5 +772,144 @@ async fn update_channel_policy(
     });
 
     client.update_channel_policy(request).await?;
+    Ok(())
+}
+
+async fn process_htlc_stream(app: &mut App) -> Result<()> {
+    let request = Request::new(routerrpc::SubscribeHtlcEventsRequest {});
+    let mut stream = app
+        .router_client
+        .subscribe_htlc_events(request)
+        .await?
+        .into_inner();
+
+    info!("Subscribed to HTLC events");
+
+    while let Some(event) = stream.next().await {
+        if app.cancellation_token.is_cancelled() {
+            info!("HTLC stream cancelled, exiting gracefully");
+            break;
+        }
+
+        match event {
+            Ok(htlc_event) => {
+                if let Err(e) = process_htlc_event(app, &htlc_event).await {
+                    error!(error = %e, "Error processing HTLC event");
+                }
+            }
+            Err(err) => {
+                error!(error = %err, "Error receiving HTLC event");
+                return Err(err.into());
+            }
+        }
+    }
+
+    info!("HTLC stream ended");
+
+    Ok(())
+}
+
+async fn process_htlc_event(app: &mut App, event: &routerrpc::HtlcEvent) -> Result<()> {
+    let mut db_client = app.postgres_connection_pool.get().await?;
+
+    let event_type = routerrpc::htlc_event::EventType::try_from(event.event_type)
+        .unwrap_or(routerrpc::htlc_event::EventType::Unknown);
+
+    if event_type != routerrpc::htlc_event::EventType::Forward {
+        debug!(
+            event_type = ?event_type,
+            incoming_channel_id = event.incoming_channel_id,
+            outgoing_channel_id = event.outgoing_channel_id,
+            incoming_htlc_id = event.incoming_htlc_id,
+            outgoing_htlc_id = event.outgoing_htlc_id,
+            timestamp_ns = event.timestamp_ns,
+            "Skipping non-FORWARD event type"
+        );
+        return Ok(());
+    }
+
+    if let Some(ref event_detail) = event.event {
+        match event_detail {
+            routerrpc::htlc_event::Event::ForwardEvent(_) => {}
+            routerrpc::htlc_event::Event::LinkFailEvent(_) => {}
+            routerrpc::htlc_event::Event::ForwardFailEvent(_) => {}
+            routerrpc::htlc_event::Event::SettleEvent(settle_event) => {
+                debug!(
+                    incoming_channel_id = event.incoming_channel_id,
+                    outgoing_channel_id = event.outgoing_channel_id,
+                    "Settle Event"
+                );
+
+                let chan_info =
+                    match get_chan_info(app.lightning_client.clone(), event.outgoing_channel_id)
+                        .await
+                    {
+                        Ok(ci) => ci,
+                        Err(e) => {
+                            debug!(
+                                "Could not get channel info for {}: {}",
+                                event.outgoing_channel_id, e
+                            );
+                            return Ok(());
+                        }
+                    };
+
+                let peer_pubkey = if chan_info.node1_pub == app.info.identity_pubkey {
+                    chan_info.node2_pub
+                } else {
+                    chan_info.node1_pub
+                };
+
+                let peer_pubkey_bytes = hex::decode(peer_pubkey)?;
+
+                let transaction = db_client.transaction().await?;
+
+                let dst_node_id = upsert_node_tx(&transaction, &peer_pubkey_bytes).await?;
+
+                let outgoing_peer_flow_vector_row = transaction
+                    .query_one(
+                        "SELECT
+                          flow_bias_index
+                         FROM peer_flow_vector
+                         WHERE src_node_id = $1 AND dst_node_id = $2",
+                        &[&app.src_node_id, &dst_node_id],
+                    )
+                    .await?;
+
+                transaction.commit().await?;
+
+                if outgoing_peer_flow_vector_row.is_empty() {
+                    warn!(
+                        "Missing peer_flow_vector for pair {} - {}",
+                        app.src_node_id, dst_node_id
+                    )
+                } else {
+                    let flow_bias_index: i16 = outgoing_peer_flow_vector_row.get(0);
+                    info!("flow_bias_index: {}", flow_bias_index);
+
+                    if flow_bias_index <= -100 {
+                        let channel_policy_change = ChannelPolicyChange {
+                            apply_at: add_time_to_policy_change(
+                                last_outbound_policy.as_ref(),
+                                CHANNEL_POLICY_CHANGE_COOLDOWN,
+                            ),
+                            channel: channel.clone(),
+                            action: "Increase Outgoing Fee Rate by 1%".to_string(),
+                            reason: format!("None"),
+                            old_policy: policy.clone(),
+                            new_policy: ChannelPolicy {
+                                fee_rate_ppm: new_fee_rate,
+                                inbound_fee_rate_ppm: new_inbound_fee_rate,
+                                ..policy.clone()
+                            },
+                        };
+                    }
+                }
+            }
+            routerrpc::htlc_event::Event::SubscribedEvent(_) => {}
+            routerrpc::htlc_event::Event::FinalHtlcEvent(_) => {}
+        }
+    }
+
     Ok(())
 }
