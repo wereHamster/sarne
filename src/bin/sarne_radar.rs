@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Parser;
 use rand::seq::IndexedRandom;
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use sha2::Digest;
 use std::collections::{HashMap, HashSet};
 use std::process::exit;
