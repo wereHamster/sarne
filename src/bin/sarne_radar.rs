@@ -862,7 +862,7 @@ fn print_payment_probe(
         if payment_probe
             .attempts
             .last()
-            .map_or(false, |attempt| attempt.failure.is_none())
+            .is_some_and(|attempt| attempt.failure.is_none())
         {
             String::from("SUCCESS")
         } else {

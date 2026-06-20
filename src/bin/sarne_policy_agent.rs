@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    ready_to_apply_channel_policy_changes.sort_by(|a, b| a.apply_at.cmp(&b.apply_at));
+    ready_to_apply_channel_policy_changes.sort_by_key(|a| a.apply_at);
     let to_apply_channel_policy_changes = if args.all {
         ready_to_apply_channel_policy_changes
     } else {
