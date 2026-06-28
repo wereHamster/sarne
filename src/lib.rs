@@ -125,6 +125,7 @@ pub async fn connect_to_lnd(config: &Config) -> Result<(tonic::transport::Channe
     http.enforce_http(false);
 
     let tls_connector = native_tls::TlsConnector::builder()
+        .request_alpns(&["h2"])
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
         .build()?

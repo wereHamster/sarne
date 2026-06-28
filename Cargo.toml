@@ -32,7 +32,7 @@ anyhow = "1.0"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2"] }
 hyper-tls = "0.6"
-native-tls = "0.2"
+native-tls = { version = "0.2", features = ["alpn"] }
 tower = "0.5"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 chrono = "0.4"
